@@ -130,14 +130,21 @@ CGO_ENABLED=0 go build -trimpath -buildvcs=false \
 ./suse-checkin
 ```
 
-打发布包（默认 `linux/amd64`、`linux/arm64`、`darwin/arm64`，输出到 `dist/`）：
+打发布包（默认 `linux/amd64`、`linux/arm64`、`darwin/arm64`，输出到 `dist/`；产物就是可直接运行的单文件二进制，不再打压缩包）：
 
 ```bash
-make release VERSION=v0.1.0
-# dist/suse-checkin_v0.1.0_linux_amd64.tar.gz
-# dist/suse-checkin_v0.1.0_linux_arm64.tar.gz
-# dist/suse-checkin_v0.1.0_darwin_arm64.tar.gz
+make release VERSION=v0.2.1
+# dist/suse-checkin_v0.2.1_linux_amd64
+# dist/suse-checkin_v0.2.1_linux_arm64
+# dist/suse-checkin_v0.2.1_darwin_arm64
 # dist/sha256sums.txt
+```
+
+Linux 上下载后加执行位即可运行（GitHub 下载不会保留可执行位）：
+
+```bash
+chmod +x suse-checkin_v0.2.1_linux_amd64
+./suse-checkin_v0.2.1_linux_amd64
 ```
 
 只打包指定平台时可以直接调脚本：`PLATFORMS="linux/amd64" ./scripts/build-release.sh v0.1.0`。
@@ -145,7 +152,7 @@ make release VERSION=v0.1.0
 ## 发布与 CI
 
 - `.github/workflows/ci.yml`：向 `main` 推送或提交 PR 时执行 gofmt 检查、`go vet`、`go test`，并在 Ubuntu runner 上交叉编译 `linux/amd64` 做一次 `-version` 冒烟测试。
-- `.github/workflows/release.yml`：推送 `v*` tag 时自动跑测试、按 tag 打包三个平台、校验 Linux 二进制能启动，然后用 `gh release create` 创建 GitHub Release 并上传 `*.tar.gz` 与 `sha256sums.txt`；重复执行会用 `--clobber` 覆盖同名产物。
+- `.github/workflows/release.yml`：推送 `v*` tag 时自动跑测试、按 tag 构建三个平台的裸二进制、直接在 Ubuntu 上执行 `linux_amd64` 校验版本，然后用 `gh release create` 创建 GitHub Release 并上传三个可执行文件与 `sha256sums.txt`；重复执行会用 `--clobber` 覆盖同名产物。
 - 版本号只有一个来源：git tag。`Version` 变量位于 [internal/version/version.go](internal/version/version.go)，由 `-ldflags -X suse-checkin/internal/version.Version=<tag>` 注入，`-version` 与启动日志、`/api/healthz` 返回的 `version` 字段都读取它。
 
 发版步骤：
