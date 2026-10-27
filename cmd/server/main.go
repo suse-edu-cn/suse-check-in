@@ -145,9 +145,9 @@ func run() error {
 	} else {
 		logger.Printf("邮件失败通知未配置（需要 CHECKIN_SMTP_USER 与 CHECKIN_SMTP_PASS）")
 	}
-	logger.Printf("服务已启动: http://%s", displayAddr(cfg.Addr))
-	if !isLoopbackAddr(cfg.Addr) {
-		logger.Printf("提示: 正在监听 %s；页面已使用 OAA 账号鉴权，但打卡账号仍由本实例统一保存", cfg.Addr)
+	logger.Printf("服务已启动: http://%s（监听 %s）", displayAddr(cfg.Addr), cfg.Addr)
+	if isWildcardAddr(cfg.Addr) {
+		logger.Printf("提示: %s 对所有网卡开放；页面需 OAA 账号登录，请在反向代理层配置 HTTPS 与访问控制", cfg.Addr)
 	}
 
 	select {
@@ -185,17 +185,14 @@ func runCaptchaCheck(client *upstream.Client, recognizer *captcha.GoCaptcha) err
 	return nil
 }
 
-func isLoopbackAddr(addr string) bool {
+// isWildcardAddr 判断监听地址是否对所有网卡开放（空主机名、0.0.0.0、::）。
+func isWildcardAddr(addr string) bool {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		host = addr
 	}
 	host = strings.Trim(host, "[]")
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	return host == "" || host == "0.0.0.0" || host == "::"
 }
 
 func displayAddr(addr string) string {

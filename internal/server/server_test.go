@@ -867,17 +867,18 @@ func TestRunAPIAndAsyncFailure(t *testing.T) {
 	t.Fatal("async run did not finish")
 }
 
-func TestHostAndContentTypeGuards(t *testing.T) {
+func TestContentTypeGuardAndCustomHost(t *testing.T) {
 	ts, token, _, _, _ := newAuthedTestHTTP(t)
+	// 反向代理会用域名访问，Host 头不再被拦截。
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/healthz", nil)
-	req.Host = "evil.example"
+	req.Host = "checkin.example.com"
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("evil host status = %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("custom host status = %d", resp.StatusCode)
 	}
 
 	resp2, _ := jsonRequest(t, ts.Client(), http.MethodGet, ts.URL+"/api/healthz", nil)

@@ -25,7 +25,7 @@
 - 手动运行：立即对定时绑定的账号执行一次。
 - 验证码留样：登录失败时保存验证码图片 + 我们填入的 OCR 文本 + 登录结果，便于后续评估与人工纠正。
 - 运行记录：账号结果、任务、OCR 结果、失败原因、样本入口。
-- 本地安全：默认只监听 `127.0.0.1`，打卡密码和 UIAS 登录会话 AES-GCM 加密落盘，API 不返回密码/Cookie；OAA 双 token 只保存在浏览器本地，服务端不落盘。
+- 部署友好：默认监听 `:8099`（所有网卡），可直接由 Nginx/域名反代访问，不再拦截非本机来源；打卡密码和 UIAS 登录会话 AES-GCM 加密落盘，API 不返回密码/Cookie；OAA 双 token 只保存在浏览器本地，服务端不落盘。
 
 ## 账号与登录
 
@@ -255,12 +255,16 @@ text, err := recognizer.Recognize(img) // 并发安全，失败自动换图重�
 
 ## 安全与隐私
 
-- 默认监听 `127.0.0.1:8099`。所有业务接口都按 OAA `user_id` 过滤，一个账号只能看到自己的打卡账号、定时设置和运行记录；跨账号读写一律返回 404。多人共用实例时仍需自行评估是否对外暴露。
-- 需要远程访问时，建议 SSH 隧道：
-  ```bash
-  ssh -L 8099:127.0.0.1:8099 user@your-host
+- 默认监听 `:8099`（所有网卡），服务本身不再校验来源 IP，反向代理或局域网访问都不会被拦截。所有业务接口都按 OAA `user_id` 过滤，一个账号只能看到自己的打卡账号、定时设置和运行记录；跨账号读写一律返回 404。
+- 服务没有内置 TLS，也没有 IP 白名单。对外暴露时请在反向代理层补上 HTTPS、访问控制和限流，例如：
+  ```nginx
+  location / {
+      proxy_pass http://127.0.0.1:8099;
+      proxy_set_header Host $host;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  }
   ```
-  或在前面加带 TLS 和独立访问控制的反向代理。
+- 只想从本机/内网访问时，把监听地址改回 `CHECKIN_ADDR=127.0.0.1:8099` 即可。
 - OAA 的 access token 与 refresh token 保存在浏览器 localStorage，退出登录会清空并调用 OAA 登出。CSP 只允许同源脚本，但 localStorage 仍可能被 XSS 读取，请只在可信浏览器环境中使用。
 - SMTP 密码只从环境变量读取，不写入 `data/state.db`；通知邮件不包含打卡密码、Cookie 或验证码图片。
 - 打卡密码、UIAS rememberMe Cookie 和扫码账号的 `_sop_session_` / `SESSION` Cookie 都使用 AES-256-GCM 加密后写入 SQLite 的 `password_enc` / `cookies_enc` 字段；密钥在 `data/key`（`0600`），`data/state.db` 也是 `0600`，数据目录 `0700`。
@@ -268,14 +272,14 @@ text, err := recognizer.Recognize(img) // 并发安全，失败自动换图重�
 - 前端按 `core / services / ui / views` 模块拆分，放在 `web/static/`，由 Go `embed` 打包进单文件二进制；页面只加载本机 `/static` 资源。
 - 密钥和密文在同一个目录，只能防止误传明文，不能抵御已控制本机账户的攻击者。不要把 `data/` 提交到 Git。
 - API 只返回 `AccountView`，不返回打卡密码或 UIAS Cookie；运行日志不打印密码/Cookie。
-- 修改类接口要求 `Content-Type: application/json`；不开启 CORS；有 Host/回环地址校验、CSP、`nosniff` 等基础防护。
+- 修改类接口要求 `Content-Type: application/json`；不开启 CORS；有 CSP、`nosniff`、`X-Frame-Options` 等基础防护。
 - 验证码样本只在本机 `data/captchas/`，其中不含凭据；请不要把样本目录随意公开。
 
 ## 配置
 
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
-| `CHECKIN_ADDR` | `127.0.0.1:8099` | HTTP 监听地址 |
+| `CHECKIN_ADDR` | `:8099` | HTTP 监听地址；空主机名表示所有网卡，只想本机访问就填 `127.0.0.1:8099` |
 | `CHECKIN_DATA_DIR` | `data` | 数据、密钥、样本目录 |
 | `CHECKIN_TZ` | `Asia/Shanghai` | 调度时区 |
 | `CHECKIN_UIAS_BASE` | `https://uias.suse.edu.cn` | UIAS 地址（测试可覆盖） |

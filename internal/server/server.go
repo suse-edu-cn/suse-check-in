@@ -8,7 +8,6 @@ import (
 	"io"
 	"io/fs"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -52,7 +51,6 @@ type Server struct {
 	notificationsAvailable bool
 	logger                 *log.Logger
 	loc                    *time.Location
-	localOnly              bool
 	handler                http.Handler
 	static                 http.Handler
 	index                  []byte
@@ -99,7 +97,6 @@ func New(cfg config.Config, st *store.Store, svc *checkin.Service, sched *schedu
 		notificationsAvailable: notificationsAvailable,
 		logger:                 logger,
 		loc:                    loc,
-		localOnly:              isLoopbackAddr(cfg.Addr),
 		static:                 staticHandler,
 		index:                  index,
 	}
@@ -122,7 +119,7 @@ func New(cfg config.Config, st *store.Store, svc *checkin.Service, sched *schedu
 	mux.HandleFunc("GET /api/samples/{date}/{file}", s.requireAuth(s.handleSample))
 	mux.Handle("GET /static/", s.static)
 	mux.HandleFunc("GET /", s.handleIndex)
-	s.handler = s.securityHeaders(s.localGuard(mux))
+	s.handler = s.securityHeaders(mux)
 	return s, nil
 }
 
@@ -706,18 +703,6 @@ func (s *Server) writeStoreError(w http.ResponseWriter, err error) {
 	}
 }
 
-func (s *Server) localGuard(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.localOnly {
-			if !isLoopbackHost(r.Host) || !isLoopbackRemote(r.RemoteAddr) {
-				http.Error(w, "仅允许本机访问", http.StatusForbidden)
-				return
-			}
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
 func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -774,42 +759,4 @@ func publicStoreError(err error) string {
 		msg = strings.TrimPrefix(msg, prefix)
 	}
 	return msg
-}
-
-func isLoopbackAddr(addr string) bool {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		host = addr
-	}
-	host = strings.Trim(host, "[]")
-	if host == "" || host == "0.0.0.0" || host == "::" {
-		return false
-	}
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
-}
-
-func isLoopbackHost(hostPort string) bool {
-	host, _, err := net.SplitHostPort(hostPort)
-	if err != nil {
-		host = hostPort
-	}
-	host = strings.Trim(host, "[]")
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
-}
-
-func isLoopbackRemote(remoteAddr string) bool {
-	host, _, err := net.SplitHostPort(remoteAddr)
-	if err != nil {
-		host = remoteAddr
-	}
-	ip := net.ParseIP(strings.Trim(host, "[]"))
-	return ip != nil && ip.IsLoopback()
 }

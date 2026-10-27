@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	DefaultAddr     = "127.0.0.1:8099"
+	DefaultAddr     = ":8099"
 	DefaultDataDir  = "data"
 	DefaultTimezone = "Asia/Shanghai"
 	DefaultUIASBase = "https://uias.suse.edu.cn"
