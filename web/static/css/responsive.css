@@ -1,0 +1,153 @@
+@media (max-width: 1040px) {
+  .dashboard {
+    grid-template-columns: minmax(0, 1fr) minmax(320px, 0.82fr);
+  }
+
+  .status-next strong {
+    font-size: 48px;
+  }
+}
+
+@media (max-width: 920px) {
+  .dashboard {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "status"
+      "accounts"
+      "runs";
+  }
+
+  .user-copy {
+    max-width: 110px;
+  }
+}
+
+@media (max-width: 720px) {
+  .app {
+    padding: 20px 14px 34px;
+  }
+
+  .topbar {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .topbar-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .user-dropdown {
+    margin-left: auto;
+  }
+
+  .meta-time {
+    margin-left: 0;
+  }
+
+  .card {
+    padding: 16px;
+    border-radius: 20px;
+  }
+
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .setting-group {
+    grid-template-columns: 1fr;
+  }
+
+  .status-main {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .status-next strong {
+    font-size: 44px;
+  }
+
+  .status-last {
+    max-width: 100%;
+    align-items: flex-start;
+    text-align: left;
+  }
+
+  .account {
+    grid-template-columns: 40px minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  .avatar {
+    width: 40px;
+    height: 40px;
+    border-radius: 12px;
+  }
+
+  .account-actions {
+    grid-column: 2;
+    justify-content: flex-start;
+    margin-top: 4px;
+  }
+
+  .account-menu {
+    right: auto;
+    left: 0;
+  }
+
+  .qr-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .qr-box {
+    width: min(220px, 100%);
+    margin: 0 auto;
+  }
+
+  .scan-result {
+    grid-template-columns: 1fr;
+  }
+
+  .dialog {
+    padding: 17px;
+  }
+}
+
+@media (max-width: 520px) {
+  .brand-mark {
+    width: 42px;
+    height: 42px;
+    border-radius: 13px;
+  }
+
+  .brand h1 {
+    font-size: 23px;
+  }
+
+  .user-trigger {
+    padding-right: 7px;
+  }
+
+  .user-copy {
+    display: none;
+  }
+
+  .run-body {
+    grid-template-columns: 1fr;
+  }
+
+  .check-list {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}

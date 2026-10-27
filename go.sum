@@ -1,0 +1,6 @@
+github.com/YN1753/GoCaptcha v0.1.0-alpha.8 h1:IwKPyJdownoxlnZGAJj361JRIRSI6Wefmij+ULCIvxY=
+github.com/YN1753/GoCaptcha v0.1.0-alpha.8/go.mod h1:GfdbQ1gc+z15ZWiXd7ZJU/mpsIBcCE0nyBzo3aMDMdU=
+github.com/ebitengine/purego v0.11.2 h1:WWiTx8rD8zYdOwSj8O/NiNbsOvSAgJMTlyV1XlbUSeU=
+github.com/ebitengine/purego v0.11.2/go.mod h1:DCHPP08djqhNSoTfImcnHYQRZmd0qhakvrozqaEYhGQ=
+golang.org/x/sys v0.35.0 h1:vz1N37gP5bs89s7He8XuIYXpyY0+QlsKmzipCbUtyxI=
+golang.org/x/sys v0.35.0/go.mod h1:BJP2sWEmIv4KK5OTEluFJCKSidICx8ciO85XgH3Ak8k=

@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SUSE 定时打卡</title>
+  <link rel="stylesheet" href="/static/css/tokens.css">
+  <link rel="stylesheet" href="/static/css/base.css">
+  <link rel="stylesheet" href="/static/css/layout.css">
+  <link rel="stylesheet" href="/static/css/components.css">
+  <link rel="stylesheet" href="/static/css/dialogs.css">
+  <link rel="stylesheet" href="/static/css/responsive.css">
+  <script type="module" src="/static/js/app.js"></script>
+</head>
+<body>
+  <div id="boot" class="boot-screen">
+    <div class="boot-card"><span class="spinner" aria-hidden="true"></span><span>正在验证登录状态…</span></div>
+  </div>
+
+  <section id="login-screen" class="login-screen" hidden>
+    <form id="login-form" class="login-card">
+      <div class="login-brand">
+        <span class="login-mark">SUSE</span>
+        <div>
+          <p class="eyebrow">SUSE CHECK-IN</p>
+          <h1>定时打卡</h1>
+          <p class="login-sub">使用 SUSE OAA 账号登录</p>
+        </div>
+      </div>
+      <label class="field">账号
+        <input id="login-account" type="text" autocomplete="username" placeholder="学号 / 用户名 / 邮箱" maxlength="128" required>
+      </label>
+      <label class="field">密码
+        <input id="login-password" type="password" autocomplete="current-password" maxlength="128" required>
+      </label>
+      <p id="login-error" class="error" role="alert" hidden></p>
+      <button id="login-submit" class="btn primary block" type="submit">登录</button>
+      <p class="login-hint">账号体系与 SUSE OAA 平台一致；access token 过期后会自动使用 refresh token 续期。</p>
+    </form>
+  </section>
+
+  <div id="app" class="app" hidden>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">SUSE</span>
+        <div>
+          <p class="eyebrow">UIAS / 652 AUTOMATION</p>
+          <h1>定时打卡</h1>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <span id="run-state" class="pill" role="status">加载中</span>
+        <button id="refresh-btn" class="icon-btn" type="button" title="刷新数据" aria-label="刷新数据">↻</button>
+        <div class="dropdown user-dropdown">
+          <button id="user-menu-btn" class="user-trigger" type="button" data-menu-trigger aria-haspopup="menu" aria-expanded="false">
+            <span id="user-avatar" class="user-avatar">?</span>
+            <span class="user-copy">
+              <strong id="user-name">—</strong>
+              <small id="user-role">—</small>
+            </span>
+            <span class="chevron" aria-hidden="true"></span>
+          </button>
+          <div id="user-menu" class="menu user-menu" role="menu" hidden>
+            <div class="menu-meta">
+              <strong id="user-menu-name">—</strong>
+              <span id="user-menu-sub">—</span>
+            </div>
+            <div class="menu-sep"></div>
+            <button id="logout-btn" class="menu-item danger" type="button" role="menuitem">退出登录</button>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <div class="meta-strip">
+      <span class="meta-item"><span class="meta-dot"></span>OAA 账号登录</span>
+      <span class="meta-item">打卡密码本地加密</span>
+      <span class="meta-item">按校区随机点位</span>
+      <span id="meta-time" class="meta-item meta-time">—</span>
+    </div>
+
+    <main class="dashboard">
+      <article class="card status-card">
+        <header class="card-head">
+          <div>
+            <p class="eyebrow">OVERVIEW · SCHEDULE</p>
+            <h2>运行状态与定时</h2>
+          </div>
+          <div class="card-head-actions">
+            <span id="schedule-state" class="badge neutral">未启用</span>
+            <button id="schedule-edit-btn" class="btn ghost small" type="button">编辑定时</button>
+          </div>
+        </header>
+        <div class="status-hero">
+          <div class="status-main">
+            <div class="status-next">
+              <span class="status-label">下次执行</span>
+              <strong id="next-run">—</strong>
+              <span id="next-run-hint" class="status-hint">定时未启用</span>
+              <span id="scheduler-message" class="status-note">—</span>
+            </div>
+            <div class="status-last">
+              <span class="status-label">上次结果</span>
+              <span id="last-result">暂无记录</span>
+            </div>
+          </div>
+          <div class="progress" id="progress-wrap" hidden>
+            <div class="progress-bar"><progress id="progress-bar" max="100" value="0"></progress></div>
+            <p id="progress-text" class="muted"></p>
+          </div>
+          <div class="status-actions">
+            <button id="run-btn" class="btn primary" type="button">运行定时账号</button>
+            <span class="status-footnote">运行定时绑定的账号，手动运行不受定时开关限制</span>
+          </div>
+        </div>
+        <div class="stat-row">
+          <div class="stat"><span>打卡账号</span><strong id="stat-accounts">0</strong></div>
+          <div class="stat"><span>最近结果</span><strong id="stat-result">—</strong></div>
+          <div class="stat"><span>失败重试</span><strong id="stat-retry">—</strong></div>
+          <div class="stat"><span>失败通知</span><strong id="stat-notify">—</strong></div>
+        </div>
+        <div class="field-label-row">
+          <span class="label">定时账号</span>
+          <span id="schedule-list-count" class="hint">0 个</span>
+        </div>
+        <div id="schedule-list" class="schedule-list"></div>
+      </article>
+
+      <article class="card accounts-card">
+        <header class="card-head">
+          <div>
+            <p class="eyebrow">ACCOUNTS</p>
+            <h2>打卡账号 <span id="accounts-count" class="count">0</span></h2>
+          </div>
+          <button id="add-account-btn" class="btn ghost small" type="button">添加账号</button>
+        </header>
+        <div id="accounts" class="account-list"></div>
+      </article>
+
+      <article class="card runs-card">
+        <header class="card-head">
+          <div>
+            <p class="eyebrow">ACTIVITY</p>
+            <h2>最近运行</h2>
+          </div>
+          <span class="card-note">最近 50 条</span>
+        </header>
+        <div id="runs" class="run-list"></div>
+      </article>
+    </main>
+  </div>
+
+  <dialog id="account-dialog" class="dialog account-dialog">
+    <form id="account-form" class="dialog-form">
+      <header class="dialog-head">
+        <div>
+          <p class="eyebrow">ACCOUNT</p>
+          <h2 id="account-dialog-title">添加打卡账号</h2>
+        </div>
+        <button id="account-cancel-x" class="icon-btn" type="button" title="关闭" aria-label="关闭">×</button>
+      </header>
+
+      <div class="form-grid">
+        <label class="field full">登录方式
+          <span class="select-wrap">
+            <select id="account-login-type">
+              <option value="password">账号密码</option>
+              <option value="wechat">微信扫码</option>
+            </select>
+          </span>
+        </label>
+
+        <div id="password-fields" class="form-grid full">
+          <label class="field">学号
+            <input id="account-student" type="text" autocomplete="username" maxlength="64" required>
+          </label>
+          <label class="field">密码
+            <input id="account-password" type="password" autocomplete="current-password" maxlength="128" placeholder="编辑时留空表示不修改">
+          </label>
+          <label class="field">姓名（可选）
+            <input id="account-name" type="text" maxlength="64">
+          </label>
+        </div>
+
+        <div id="wechat-fields" class="wechat-panel full" hidden>
+          <div class="qr-layout">
+            <div class="qr-box">
+              <div id="wechat-qr-placeholder" class="qr-placeholder">选择微信扫码后获取二维码</div>
+              <img id="wechat-qr-image" alt="微信登录二维码" hidden>
+            </div>
+            <div class="qr-copy">
+              <span id="wechat-status-badge" class="badge neutral">未开始</span>
+              <h3>微信扫码登录</h3>
+              <p id="wechat-status-text">扫码成功后会自动获取学号与姓名，扫码凭证只保存在服务端。</p>
+              <div class="qr-actions">
+                <button id="wechat-start" class="btn ghost small" type="button">获取二维码</button>
+                <button id="wechat-refresh" class="btn ghost small" type="button" hidden>刷新二维码</button>
+              </div>
+            </div>
+          </div>
+          <div id="scan-result" class="scan-result" hidden>
+            <label class="field">学号
+              <input id="wechat-student" type="text" readonly>
+            </label>
+            <label class="field">姓名
+              <input id="wechat-name" type="text" maxlength="64">
+            </label>
+          </div>
+        </div>
+
+        <label class="field full">校区
+          <span class="select-wrap">
+            <select id="account-campus">
+              <option value="宜宾">宜宾</option>
+              <option value="李白河">李白河</option>
+              <option value="汇东">汇东</option>
+            </select>
+          </span>
+        </label>
+        <p id="campus-hint" class="info-note full"></p>
+        <p id="account-error" class="error full" hidden></p>
+      </div>
+
+      <footer class="dialog-actions">
+        <button id="account-cancel" class="btn ghost" type="button">取消</button>
+        <button id="account-save" class="btn primary" type="submit">保存账号</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="schedule-dialog" class="dialog schedule-dialog">
+    <form id="schedule-form" class="dialog-form">
+      <header class="dialog-head">
+        <div>
+          <p class="eyebrow">SCHEDULE</p>
+          <h2>定时设置</h2>
+        </div>
+        <button id="schedule-close-x" class="icon-btn" type="button" title="关闭" aria-label="关闭">×</button>
+      </header>
+
+      <div class="form-grid">
+        <label class="switch-row full">
+          <span class="switch-copy">
+            <strong>启用每日定时</strong>
+            <small>Asia/Shanghai · 错过后不补跑</small>
+          </span>
+          <input id="schedule-enabled" type="checkbox">
+        </label>
+        <label class="field">执行时间
+          <input id="schedule-time" type="time" step="1" required>
+        </label>
+        <label class="field">失败重试次数
+          <input id="schedule-retries" type="number" min="0" max="10" step="1" required>
+        </label>
+        <label class="field">重试间隔（分钟）
+          <input id="schedule-interval" type="number" min="1" max="60" step="1" required>
+        </label>
+
+        <div class="setting-group full">
+          <label class="switch-row">
+            <span class="switch-copy">
+              <strong>失败时邮件通知</strong>
+              <small id="notify-hint">定时任务重试后仍失败时发送</small>
+            </span>
+            <input id="schedule-notify" type="checkbox">
+          </label>
+          <label class="field">通知邮箱
+            <input id="schedule-notify-email" type="email" maxlength="254" placeholder="name@example.com" autocomplete="email">
+          </label>
+        </div>
+
+        <div class="full">
+          <div class="field-label-row">
+            <span class="label">参与定时的账号</span>
+            <span class="hint">扫码账号会在会话有效期内参与定时</span>
+          </div>
+          <div id="schedule-accounts" class="check-list"></div>
+        </div>
+      </div>
+
+      <footer class="dialog-actions">
+        <span id="schedule-dirty" class="tag warn" hidden>未保存</span>
+        <button id="schedule-cancel" class="btn ghost" type="button">取消</button>
+        <button id="schedule-save" class="btn primary" type="submit">保存设置</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="sample-dialog" class="dialog sample-dialog">
+    <header class="dialog-head">
+      <div>
+        <p class="eyebrow">CAPTCHA SAMPLE</p>
+        <h2>验证码样本</h2>
+      </div>
+      <button id="sample-close" class="icon-btn" type="button" title="关闭" aria-label="关闭">×</button>
+    </header>
+    <img id="sample-image" alt="验证码样本" hidden>
+    <p id="sample-error" class="error"></p>
+  </dialog>
+
+  <div id="toast" class="toast" hidden></div>
+  <noscript><p class="notice">需要启用 JavaScript 才能使用本页面。</p></noscript>
+</body>
+</html>

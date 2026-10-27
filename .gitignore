@@ -1,0 +1,5 @@
+data/
+dist/
+/suse-checkin
+*.log
+.DS_Store
