@@ -44,6 +44,7 @@ var (
 
 type Progress struct {
 	Running   bool       `json:"running"`
+	OwnerID   uint64     `json:"-"`
 	Trigger   string     `json:"trigger,omitempty"`
 	Current   string     `json:"current,omitempty"`
 	Done      int        `json:"done"`
@@ -127,30 +128,30 @@ func New(opts Options) (*Service, error) {
 	}, nil
 }
 
-func (s *Service) RunAccounts(ctx context.Context, accountIDs []int64, trigger string) (store.Run, error) {
+func (s *Service) RunAccounts(ctx context.Context, ownerID uint64, accountIDs []int64, trigger string) (store.Run, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if len(accountIDs) == 0 {
 		return store.Run{}, ErrNoAccounts
 	}
-	if !s.beginRun(trigger, len(accountIDs)) {
+	if !s.beginRun(ownerID, trigger, len(accountIDs)) {
 		return store.Run{}, ErrAlreadyRunning
 	}
 	defer s.endRun()
-	return s.runAccounts(ctx, accountIDs, trigger)
+	return s.runAccounts(ctx, ownerID, accountIDs, trigger)
 }
 
-func (s *Service) StartRun(accountIDs []int64, trigger string) error {
+func (s *Service) StartRun(ownerID uint64, accountIDs []int64, trigger string) error {
 	if len(accountIDs) == 0 {
 		return ErrNoAccounts
 	}
-	if !s.beginRun(trigger, len(accountIDs)) {
+	if !s.beginRun(ownerID, trigger, len(accountIDs)) {
 		return ErrAlreadyRunning
 	}
 	go func() {
 		defer s.endRun()
-		if _, err := s.runAccounts(context.Background(), accountIDs, trigger); err != nil {
+		if _, err := s.runAccounts(context.Background(), ownerID, accountIDs, trigger); err != nil {
 			s.logger.Printf("[checkin] %s 运行失败: %v", trigger, err)
 		}
 	}()
@@ -163,15 +164,19 @@ func (s *Service) IsRunning() bool {
 	return s.running
 }
 
-func (s *Service) Progress() Progress {
+// ProgressFor 只返回 ownerID 自己的运行进度，避免页面看到别人的账号名。
+func (s *Service) ProgressFor(ownerID uint64) Progress {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.progress.OwnerID != ownerID {
+		return Progress{}
+	}
 	out := s.progress
 	out.StartedAt = copyTimePtr(s.progress.StartedAt)
 	return out
 }
 
-func (s *Service) beginRun(trigger string, total int) bool {
+func (s *Service) beginRun(ownerID uint64, trigger string, total int) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.running {
@@ -181,6 +186,7 @@ func (s *Service) beginRun(trigger string, total int) bool {
 	s.running = true
 	s.progress = Progress{
 		Running:   true,
+		OwnerID:   ownerID,
 		Trigger:   trigger,
 		Total:     total,
 		StartedAt: &now,
@@ -197,8 +203,8 @@ func (s *Service) endRun() {
 	s.progress.StartedAt = nil
 }
 
-func (s *Service) runAccounts(ctx context.Context, accountIDs []int64, trigger string) (store.Run, error) {
-	schedule := s.store.Schedule()
+func (s *Service) runAccounts(ctx context.Context, ownerID uint64, accountIDs []int64, trigger string) (store.Run, error) {
+	schedule := s.store.Schedule(ownerID)
 	run := store.Run{
 		Trigger:   trigger,
 		StartedAt: s.nowTime(),
@@ -210,7 +216,7 @@ func (s *Service) runAccounts(ctx context.Context, accountIDs []int64, trigger s
 			canceled = err
 			break
 		}
-		acc, ok := s.store.Account(accountID)
+		acc, ok := s.store.Account(ownerID, accountID)
 		if !ok {
 			now := s.nowTime()
 			run.Results = append(run.Results, store.AccountResult{
@@ -225,13 +231,13 @@ func (s *Service) runAccounts(ctx context.Context, accountIDs []int64, trigger s
 		}
 		display := displayName(acc)
 		s.setProgressCurrent(display, i)
-		result := s.runAccount(ctx, acc, schedule.MaxRetries, time.Duration(schedule.RetryIntervalMinutes)*time.Minute)
+		result := s.runAccount(ctx, ownerID, acc, schedule.MaxRetries, time.Duration(schedule.RetryIntervalMinutes)*time.Minute)
 		run.Results = append(run.Results, result)
 		statusText := "成功：" + result.Message
 		if isFailure(result.Status) {
 			statusText = "失败：" + result.Message
 		}
-		if err := s.store.UpdateCheckinStatus(acc.ID, statusText, s.nowTime()); err != nil {
+		if err := s.store.UpdateCheckinStatus(ownerID, acc.ID, statusText, s.nowTime()); err != nil {
 			s.logger.Printf("[checkin] 账号 %d 回写状态失败: %v", acc.ID, err)
 		}
 		s.setProgressDone(i+1, display)
@@ -247,7 +253,7 @@ func (s *Service) runAccounts(ctx context.Context, accountIDs []int64, trigger s
 	if canceled != nil {
 		run.Summary += "（已取消）"
 	}
-	saved, err := s.store.AppendRun(run)
+	saved, err := s.store.AppendRun(ownerID, run)
 	if err != nil {
 		s.logger.Printf("[checkin] 保存运行记录失败: %v", err)
 		return run, err
@@ -259,9 +265,9 @@ func (s *Service) runAccounts(ctx context.Context, accountIDs []int64, trigger s
 	return saved, nil
 }
 
-func (s *Service) runAccount(ctx context.Context, acc store.Account, maxRetries int, interval time.Duration) store.AccountResult {
+func (s *Service) runAccount(ctx context.Context, ownerID uint64, acc store.Account, maxRetries int, interval time.Duration) store.AccountResult {
 	if acc.LoginType == store.LoginWechat {
-		return s.runWechatAccount(ctx, acc, maxRetries, interval)
+		return s.runWechatAccount(ctx, ownerID, acc, maxRetries, interval)
 	}
 	result := store.AccountResult{
 		AccountID:   acc.ID,
@@ -287,7 +293,7 @@ func (s *Service) runAccount(ctx context.Context, acc store.Account, maxRetries 
 				break
 			}
 		}
-		attemptResult, retryable := s.attempt(ctx, acc, password, attempt+1)
+		attemptResult, retryable := s.attempt(ctx, ownerID, acc, password, attempt+1)
 		attemptResult.AccountID = acc.ID
 		attemptResult.StudentID = acc.StudentID
 		attemptResult.AccountName = displayName(acc)
@@ -301,7 +307,7 @@ func (s *Service) runAccount(ctx context.Context, acc store.Account, maxRetries 
 	return result
 }
 
-func (s *Service) runWechatAccount(ctx context.Context, acc store.Account, maxRetries int, interval time.Duration) store.AccountResult {
+func (s *Service) runWechatAccount(ctx context.Context, ownerID uint64, acc store.Account, maxRetries int, interval time.Duration) store.AccountResult {
 	result := store.AccountResult{
 		AccountID:   acc.ID,
 		StudentID:   acc.StudentID,
@@ -355,7 +361,7 @@ func (s *Service) runWechatAccount(ctx context.Context, acc store.Account, maxRe
 			continue
 		}
 		cookies = updated
-		if err := s.store.SaveRememberCookies(acc.ID, updated, expires); err != nil {
+		if err := s.store.SaveRememberCookies(ownerID, acc.ID, updated, expires); err != nil {
 			s.logger.Printf("[checkin] 账号 %d 更新扫码会话失败: %v", acc.ID, err)
 		}
 		attemptResult := result
@@ -370,7 +376,7 @@ func (s *Service) runWechatAccount(ctx context.Context, acc store.Account, maxRe
 	return result
 }
 
-func (s *Service) attempt(ctx context.Context, acc store.Account, password string, attemptNo int) (result store.AccountResult, retryable bool) {
+func (s *Service) attempt(ctx context.Context, ownerID uint64, acc store.Account, password string, attemptNo int) (result store.AccountResult, retryable bool) {
 	result = store.AccountResult{
 		AccountID:   acc.ID,
 		StudentID:   acc.StudentID,
@@ -457,7 +463,7 @@ func (s *Service) attempt(ctx context.Context, acc store.Account, password strin
 	}
 
 	if cookies := session.RememberCookies(); cookies != "" {
-		if err := s.store.SaveRememberCookies(acc.ID, cookies, s.nowTime().Add(rememberDuration)); err != nil {
+		if err := s.store.SaveRememberCookies(ownerID, acc.ID, cookies, s.nowTime().Add(rememberDuration)); err != nil {
 			s.logger.Printf("[checkin] 账号 %d 保存 rememberMe 失败: %v", acc.ID, err)
 		}
 	}

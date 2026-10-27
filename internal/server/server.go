@@ -410,6 +410,7 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusBadGateway, "OAA 认证服务暂不可用")
 			return
 		}
+		s.claimLegacy(user)
 		next(w, r.WithContext(context.WithValue(r.Context(), oaaUserKey{}, user)))
 	}
 }
@@ -454,14 +455,19 @@ func (s *Server) writeRefreshError(w http.ResponseWriter, err error) {
 	writeError(w, http.StatusBadGateway, "OAA 认证服务暂不可用")
 }
 
-func (s *Server) handleState(w http.ResponseWriter, _ *http.Request) {
-	snap := s.st.Snapshot(50)
+func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
+	user, ok := oaaUserFrom(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "请先登录")
+		return
+	}
+	snap := s.st.Snapshot(user.UserID, 50)
 	writeJSON(w, http.StatusOK, stateResponse{
 		Accounts:               snap.Accounts,
 		Campuses:               locations.Summaries(),
 		Schedule:               snap.Schedule,
-		Scheduler:              s.sched.Status(),
-		Progress:               s.svc.Progress(),
+		Scheduler:              s.sched.Status(user.UserID),
+		Progress:               s.svc.ProgressFor(user.UserID),
 		Runs:                   snap.Runs,
 		ServerTime:             time.Now().In(s.loc),
 		Timezone:               s.cfg.Timezone,
@@ -469,13 +475,30 @@ func (s *Server) handleState(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
+// claimLegacy 把旧版 state.json 里的数据迁移给第一个登录的 OAA 用户。
+func (s *Server) claimLegacy(user oaa.User) {
+	imported, err := s.st.ClaimLegacy(user.UserID)
+	if err != nil {
+		s.logger.Printf("[server] 迁移旧版数据失败: %v", err)
+		return
+	}
+	if imported {
+		s.logger.Printf("[server] 已把旧版 state.json 数据迁移给 OAA 用户 %d（%s）", user.UserID, user.StudentID)
+	}
+}
+
 func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
+	user, ok := oaaUserFrom(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "请先登录")
+		return
+	}
 	var req accountRequest
 	if err := s.decodeJSON(w, r, &req); err != nil {
 		writeDecodeError(w, err)
 		return
 	}
-	view, err := s.st.AddAccount(store.AccountInput{
+	view, err := s.st.AddAccount(user.UserID, store.AccountInput{
 		StudentID: req.StudentID,
 		Password:  req.Password,
 		Name:      req.Name,
@@ -490,6 +513,11 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
+	user, userOK := oaaUserFrom(r.Context())
+	if !userOK {
+		writeError(w, http.StatusUnauthorized, "请先登录")
+		return
+	}
 	id, ok := pathID(w, r)
 	if !ok {
 		return
@@ -499,7 +527,7 @@ func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 		writeDecodeError(w, err)
 		return
 	}
-	view, err := s.st.UpdateAccount(id, store.AccountInput{
+	view, err := s.st.UpdateAccount(user.UserID, id, store.AccountInput{
 		StudentID: req.StudentID,
 		Password:  req.Password,
 		Name:      req.Name,
@@ -514,11 +542,16 @@ func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
+	user, userOK := oaaUserFrom(r.Context())
+	if !userOK {
+		writeError(w, http.StatusUnauthorized, "请先登录")
+		return
+	}
 	id, ok := pathID(w, r)
 	if !ok {
 		return
 	}
-	if err := s.st.DeleteAccount(id); err != nil {
+	if err := s.st.DeleteAccount(user.UserID, id); err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
@@ -527,6 +560,11 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSaveSchedule(w http.ResponseWriter, r *http.Request) {
+	user, ok := oaaUserFrom(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "请先登录")
+		return
+	}
 	var req scheduleRequest
 	if err := s.decodeJSON(w, r, &req); err != nil {
 		writeDecodeError(w, err)
@@ -536,7 +574,7 @@ func (s *Server) handleSaveSchedule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "服务端未配置 SMTP 发信邮箱，暂不能开启失败通知")
 		return
 	}
-	saved, err := s.st.SaveSchedule(store.Schedule{
+	saved, err := s.st.SaveSchedule(user.UserID, store.Schedule{
 		Enabled:              req.Enabled,
 		TimeOfDay:            req.TimeOfDay,
 		AccountIDs:           req.AccountIDs,
@@ -554,6 +592,11 @@ func (s *Server) handleSaveSchedule(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
+	user, ok := oaaUserFrom(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "请先登录")
+		return
+	}
 	var req runRequest
 	if err := s.decodeJSON(w, r, &req); err != nil {
 		writeDecodeError(w, err)
@@ -565,12 +608,12 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, id := range ids {
-		if _, ok := s.st.Account(id); !ok {
+		if _, ok := s.st.Account(user.UserID, id); !ok {
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("账号 %d 不存在", id))
 			return
 		}
 	}
-	if err := s.svc.StartRun(ids, "manual"); err != nil {
+	if err := s.svc.StartRun(user.UserID, ids, "manual"); err != nil {
 		switch {
 		case errors.Is(err, checkin.ErrAlreadyRunning):
 			writeError(w, http.StatusConflict, "已有打卡任务正在运行")

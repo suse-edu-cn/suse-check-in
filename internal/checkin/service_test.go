@@ -20,6 +20,8 @@ import (
 	"suse-checkin/internal/upstream"
 )
 
+const testOwner uint64 = 1
+
 type stubRecognizer struct {
 	mu    sync.Mutex
 	codes []string
@@ -225,7 +227,7 @@ func newCheckinEnv(t *testing.T, fake *checkinFake, rec *stubRecognizer, maxRetr
 	if err != nil {
 		t.Fatal(err)
 	}
-	acc, err := st.AddAccount(store.AccountInput{
+	acc, err := st.AddAccount(testOwner, store.AccountInput{
 		StudentID: "20240001",
 		Password:  "secret-pass",
 		Name:      "测试账号",
@@ -252,7 +254,7 @@ func newCheckinEnv(t *testing.T, fake *checkinFake, rec *stubRecognizer, maxRetr
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.SaveSchedule(store.Schedule{
+	if _, err := st.SaveSchedule(testOwner, store.Schedule{
 		TimeOfDay:            "07:00:00",
 		AccountIDs:           []int64{acc.ID},
 		MaxRetries:           maxRetries,
@@ -279,7 +281,7 @@ func TestServiceWechatSessionCheckin(t *testing.T) {
 	svc, st, _, _ := newCheckinEnv(t, fake, rec, 0)
 	expires := time.Now().Add(48 * time.Hour)
 	jwt := checkinSopJWT("20240030", "扫码用户", "open-1", time.Date(2026, 10, 28, 7, 0, 0, 0, time.UTC))
-	view, err := st.AddWechatAccount(store.WechatAccountInput{
+	view, err := st.AddWechatAccount(testOwner, store.WechatAccountInput{
 		StudentID: "20240030",
 		Name:      "扫码用户",
 		Campus:    "宜宾",
@@ -289,7 +291,7 @@ func TestServiceWechatSessionCheckin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := svc.RunAccounts(context.Background(), []int64{view.ID}, "manual")
+	run, err := svc.RunAccounts(context.Background(), testOwner, []int64{view.ID}, "manual")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -304,7 +306,7 @@ func TestServiceWechatSessionCheckin(t *testing.T) {
 	if captchaFetches != 0 || loginPosts != 0 || submitCalls != 1 {
 		t.Fatalf("counts = %d/%d/%d", captchaFetches, loginPosts, submitCalls)
 	}
-	acc, _ := st.Account(view.ID)
+	acc, _ := st.Account(testOwner, view.ID)
 	cookies, err := st.RememberCookies(acc)
 	if err != nil || !strings.Contains(cookies, "SESSION=qr-session") {
 		t.Fatalf("cookies = %q, %v", cookies, err)
@@ -316,7 +318,7 @@ func TestServiceWechatSessionExpired(t *testing.T) {
 	rec := &stubRecognizer{}
 	svc, st, _, _ := newCheckinEnv(t, fake, rec, 0)
 	jwt := checkinSopJWT("20240031", "过期用户", "open-2", time.Date(2026, 10, 25, 7, 0, 0, 0, time.UTC))
-	view, err := st.AddWechatAccount(store.WechatAccountInput{
+	view, err := st.AddWechatAccount(testOwner, store.WechatAccountInput{
 		StudentID: "20240031",
 		Name:      "过期用户",
 		Campus:    "宜宾",
@@ -326,7 +328,7 @@ func TestServiceWechatSessionExpired(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := svc.RunAccounts(context.Background(), []int64{view.ID}, "manual")
+	run, err := svc.RunAccounts(context.Background(), testOwner, []int64{view.ID}, "manual")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,7 +346,7 @@ func TestServiceSuccess(t *testing.T) {
 	rec := &stubRecognizer{codes: []string{"6800"}}
 	svc, st, id, dataDir := newCheckinEnv(t, fake, rec, 0)
 
-	run, err := svc.RunAccounts(context.Background(), []int64{id}, "manual")
+	run, err := svc.RunAccounts(context.Background(), testOwner, []int64{id}, "manual")
 	if err != nil {
 		t.Fatalf("RunAccounts: %v", err)
 	}
@@ -411,7 +413,7 @@ func TestServiceSuccess(t *testing.T) {
 		t.Fatalf("qdddjtdz = %v, want %s", payload["qdddjtdz"], matched.Address)
 	}
 
-	snap := st.Snapshot(10)
+	snap := st.Snapshot(testOwner, 10)
 	if len(snap.Runs) != 1 || snap.Runs[0].ID != run.ID {
 		t.Fatalf("runs = %+v", snap.Runs)
 	}
@@ -430,7 +432,7 @@ func TestServiceAlreadyChecked(t *testing.T) {
 	rec := &stubRecognizer{codes: []string{"6800"}}
 	svc, _, id, _ := newCheckinEnv(t, fake, rec, 0)
 
-	run, err := svc.RunAccounts(context.Background(), []int64{id}, "manual")
+	run, err := svc.RunAccounts(context.Background(), testOwner, []int64{id}, "manual")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -449,7 +451,7 @@ func TestServiceNoTask(t *testing.T) {
 	rec := &stubRecognizer{codes: []string{"6800"}}
 	svc, _, id, _ := newCheckinEnv(t, fake, rec, 0)
 
-	run, err := svc.RunAccounts(context.Background(), []int64{id}, "manual")
+	run, err := svc.RunAccounts(context.Background(), testOwner, []int64{id}, "manual")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -469,7 +471,7 @@ func TestServiceRetriesOCR(t *testing.T) {
 	}
 	svc, _, id, dataDir := newCheckinEnv(t, fake, rec, 1)
 
-	run, err := svc.RunAccounts(context.Background(), []int64{id}, "manual")
+	run, err := svc.RunAccounts(context.Background(), testOwner, []int64{id}, "manual")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -495,7 +497,7 @@ func TestServiceSMSRequiredStopsRetry(t *testing.T) {
 	rec := &stubRecognizer{codes: []string{"6800"}}
 	svc, _, id, _ := newCheckinEnv(t, fake, rec, 3)
 
-	run, err := svc.RunAccounts(context.Background(), []int64{id}, "manual")
+	run, err := svc.RunAccounts(context.Background(), testOwner, []int64{id}, "manual")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -514,7 +516,7 @@ func TestServiceWrongPasswordStopsRetry(t *testing.T) {
 	rec := &stubRecognizer{codes: []string{"6800"}}
 	svc, _, id, _ := newCheckinEnv(t, fake, rec, 3)
 
-	run, err := svc.RunAccounts(context.Background(), []int64{id}, "manual")
+	run, err := svc.RunAccounts(context.Background(), testOwner, []int64{id}, "manual")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -532,11 +534,11 @@ func TestServiceRememberMeSkipsCaptcha(t *testing.T) {
 	fake := newCheckinFake(t, opts)
 	rec := &stubRecognizer{codes: []string{"6800"}}
 	svc, st, id, _ := newCheckinEnv(t, fake, rec, 0)
-	if err := st.SaveRememberCookies(id, "CASTGC=valid", time.Date(2026, 10, 27, 7, 0, 0, 0, time.UTC)); err != nil {
+	if err := st.SaveRememberCookies(testOwner, id, "CASTGC=valid", time.Date(2026, 10, 27, 7, 0, 0, 0, time.UTC)); err != nil {
 		t.Fatal(err)
 	}
 
-	run, err := svc.RunAccounts(context.Background(), []int64{id}, "manual")
+	run, err := svc.RunAccounts(context.Background(), testOwner, []int64{id}, "manual")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -560,7 +562,7 @@ func TestServiceSubmitBusinessFailure(t *testing.T) {
 	rec := &stubRecognizer{codes: []string{"6800"}}
 	svc, _, id, _ := newCheckinEnv(t, fake, rec, 3)
 
-	run, err := svc.RunAccounts(context.Background(), []int64{id}, "manual")
+	run, err := svc.RunAccounts(context.Background(), testOwner, []int64{id}, "manual")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -605,7 +607,7 @@ func TestSampleMetaContainsNoSecrets(t *testing.T) {
 	fake := newCheckinFake(t, defaultFakeOptions())
 	rec := &stubRecognizer{codes: []string{"6800"}}
 	svc, _, id, dataDir := newCheckinEnv(t, fake, rec, 0)
-	if _, err := svc.RunAccounts(context.Background(), []int64{id}, "manual"); err != nil {
+	if _, err := svc.RunAccounts(context.Background(), testOwner, []int64{id}, "manual"); err != nil {
 		t.Fatal(err)
 	}
 	files, _ := filepath.Glob(filepath.Join(dataDir, "captchas", "*", "*.json"))

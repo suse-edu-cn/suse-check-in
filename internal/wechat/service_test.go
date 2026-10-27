@@ -126,7 +126,7 @@ func TestWechatServiceComplete(t *testing.T) {
 	if view.LoginType != store.LoginWechat || view.StudentID != "20240001" {
 		t.Fatalf("account = %+v", view)
 	}
-	acc, ok := st.Account(view.ID)
+	acc, ok := st.Account(7, view.ID)
 	if !ok {
 		t.Fatal("account missing")
 	}
@@ -147,7 +147,7 @@ func TestWechatServiceRescanUpdatesAccount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	acc, err := st.AddWechatAccount(store.WechatAccountInput{
+	acc, err := st.AddWechatAccount(7, store.WechatAccountInput{
 		StudentID: "20240002",
 		Name:      "扫码用户",
 		Campus:    "宜宾",
@@ -173,7 +173,7 @@ func TestWechatServiceRescanUpdatesAccount(t *testing.T) {
 	if view.ID != acc.ID || view.Name != "新名字" || view.Campus != "汇东" {
 		t.Fatalf("view = %+v", view)
 	}
-	updated, _ := st.Account(acc.ID)
+	updated, _ := st.Account(7, acc.ID)
 	cookies, _ := st.RememberCookies(updated)
 	if !strings.Contains(cookies, "SESSION=session-1") {
 		t.Fatalf("cookies = %q", cookies)

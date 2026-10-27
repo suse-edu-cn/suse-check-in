@@ -153,16 +153,16 @@ func (s *Service) Complete(id string, ownerID uint64, in CompleteInput) (store.A
 		err  error
 	)
 	if in.AccountID > 0 {
-		acc, ok := s.store.Account(in.AccountID)
+		acc, ok := s.store.Account(ownerID, in.AccountID)
 		if !ok {
 			return store.AccountView{}, store.ErrNotFound
 		}
 		if acc.LoginType != store.LoginWechat || acc.StudentID != result.StudentID {
 			return store.AccountView{}, errors.New("该账号不是对应的扫码登录账号")
 		}
-		view, err = s.store.UpdateWechatSession(acc.ID, name, in.Campus, result.Cookies, result.ExpiresAt)
+		view, err = s.store.UpdateWechatSession(ownerID, acc.ID, name, in.Campus, result.Cookies, result.ExpiresAt)
 	} else {
-		view, err = s.store.AddWechatAccount(store.WechatAccountInput{
+		view, err = s.store.AddWechatAccount(ownerID, store.WechatAccountInput{
 			StudentID: result.StudentID,
 			Name:      name,
 			Campus:    in.Campus,

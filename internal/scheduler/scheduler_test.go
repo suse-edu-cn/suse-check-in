@@ -9,14 +9,20 @@ import (
 	"suse-checkin/internal/store"
 )
 
-type fakeRunner struct {
-	calls  chan []int64
-	result store.Run
+type runCall struct {
+	ownerID uint64
+	ids     []int64
 }
 
-func (f *fakeRunner) RunAccounts(_ context.Context, accountIDs []int64, _ string) (store.Run, error) {
+type fakeRunner struct {
+	calls   chan runCall
+	result  store.Run
+	running bool
+}
+
+func (f *fakeRunner) RunAccounts(_ context.Context, ownerID uint64, accountIDs []int64, _ string) (store.Run, error) {
 	select {
-	case f.calls <- append([]int64(nil), accountIDs...):
+	case f.calls <- runCall{ownerID: ownerID, ids: append([]int64(nil), accountIDs...)}:
 	default:
 	}
 	if f.result.Results != nil {
@@ -25,7 +31,7 @@ func (f *fakeRunner) RunAccounts(_ context.Context, accountIDs []int64, _ string
 	return store.Run{Summary: "ok", StartedAt: time.Now(), FinishedAt: time.Now()}, nil
 }
 
-func (f *fakeRunner) IsRunning() bool { return false }
+func (f *fakeRunner) IsRunning() bool { return f.running }
 
 type notifyCall struct {
 	to         string
@@ -40,6 +46,29 @@ type fakeNotifier struct {
 func (f *fakeNotifier) NotifyFailure(_ context.Context, to string, run store.Run, maxRetries int) error {
 	f.calls <- notifyCall{to: to, run: run, maxRetries: maxRetries}
 	return nil
+}
+
+func newStore(t *testing.T) *store.Store {
+	t.Helper()
+	st, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	return st
+}
+
+func addAccount(t *testing.T, st *store.Store, ownerID uint64, studentID string) store.AccountView {
+	t.Helper()
+	acc, err := st.AddAccount(ownerID, store.AccountInput{
+		StudentID: studentID,
+		Password:  "pass",
+		Campus:    "宜宾",
+	})
+	if err != nil {
+		t.Fatalf("AddAccount: %v", err)
+	}
+	return acc
 }
 
 func TestParseTimeOfDay(t *testing.T) {
@@ -63,77 +92,191 @@ func TestParseTimeOfDay(t *testing.T) {
 	}
 }
 
-func TestNextRun(t *testing.T) {
+func TestNextRunAt(t *testing.T) {
 	loc, err := time.LoadLocation("Asia/Shanghai")
 	if err != nil {
 		t.Fatal(err)
 	}
 	before := time.Date(2026, 10, 26, 6, 30, 0, 0, loc)
-	got := nextRun(before, 7, 0, 0, loc)
+	got, err := nextRunAt(before, "07:00:00", loc)
+	if err != nil {
+		t.Fatal(err)
+	}
 	want := time.Date(2026, 10, 26, 7, 0, 0, 0, loc)
 	if !got.Equal(want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
 
 	after := time.Date(2026, 10, 26, 7, 0, 1, 0, loc)
-	got = nextRun(after, 7, 0, 0, loc)
+	got, err = nextRunAt(after, "07:00:00", loc)
+	if err != nil {
+		t.Fatal(err)
+	}
 	want = time.Date(2026, 10, 27, 7, 0, 0, 0, loc)
 	if !got.Equal(want) {
 		t.Fatalf("after: got %v, want %v", got, want)
 	}
 }
 
-func TestSchedulerRunsAtScheduledTime(t *testing.T) {
-	loc, err := time.LoadLocation("Asia/Shanghai")
-	if err != nil {
+func TestStatusReflectsSchedule(t *testing.T) {
+	loc, _ := time.LoadLocation("Asia/Shanghai")
+	st := newStore(t)
+	sched := New(st, &fakeRunner{calls: make(chan runCall, 1)}, nil, loc, nil)
+
+	if got := sched.Status(1); got.Enabled || got.Message != "定时打卡未启用" {
+		t.Fatalf("disabled status = %+v", got)
+	}
+	acc := addAccount(t, st, 1, "20240001")
+	if _, err := st.SaveSchedule(1, store.Schedule{
+		Enabled: true, TimeOfDay: "07:30:00", AccountIDs: []int64{acc.ID},
+		MaxRetries: 1, RetryIntervalMinutes: 1,
+	}); err != nil {
 		t.Fatal(err)
 	}
-	st, err := store.New(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
+	got := sched.Status(1)
+	if !got.Enabled || got.NextRun == nil || got.NextRunText == "" {
+		t.Fatalf("enabled status = %+v", got)
 	}
-	acc, err := st.AddAccount(store.AccountInput{
-		StudentID: "20240001",
-		Password:  "pass",
-		Campus:    "宜宾",
-	})
-	if err != nil {
-		t.Fatal(err)
+	if got.Message != "等待执行" && got.Message != "今日定时打卡已执行" {
+		t.Fatalf("message = %q", got.Message)
 	}
-	target := time.Now().In(loc).Add(3 * time.Second)
-	if _, err := st.SaveSchedule(store.Schedule{
+	if other := sched.Status(2); other.Enabled {
+		t.Fatalf("other owner status = %+v", other)
+	}
+}
+
+func TestCheckRunsDueSchedule(t *testing.T) {
+	loc, _ := time.LoadLocation("Asia/Shanghai")
+	st := newStore(t)
+	acc := addAccount(t, st, 7, "20240002")
+	now := time.Now().In(loc)
+	if _, err := st.SaveSchedule(7, store.Schedule{
 		Enabled:              true,
-		TimeOfDay:            target.Format("15:04:05"),
+		TimeOfDay:            now.Add(-30 * time.Second).Format("15:04:05"),
 		AccountIDs:           []int64{acc.ID},
 		MaxRetries:           0,
 		RetryIntervalMinutes: 1,
 	}); err != nil {
 		t.Fatal(err)
 	}
-
-	runner := &fakeRunner{calls: make(chan []int64, 1)}
+	runner := &fakeRunner{calls: make(chan runCall, 1)}
 	sched := New(st, runner, nil, loc, nil)
-	sched.Start()
-	defer sched.Stop()
+	sched.check(context.Background())
 
 	select {
-	case ids := <-runner.calls:
-		if len(ids) != 1 || ids[0] != acc.ID {
-			t.Fatalf("ids = %v", ids)
+	case call := <-runner.calls:
+		if call.ownerID != 7 || len(call.ids) != 1 || call.ids[0] != acc.ID {
+			t.Fatalf("call = %+v", call)
 		}
-	case <-time.After(7 * time.Second):
-		t.Fatal("scheduler did not run")
+	default:
+		t.Fatal("scheduler did not run due schedule")
+	}
+	if got := st.Schedule(7); got.LastRunDate != now.Format("2006-01-02") {
+		t.Fatalf("last run date not marked: %+v", got)
+	}
+}
+
+func TestCheckSkipsNotDueAlreadyRunAndStale(t *testing.T) {
+	loc, _ := time.LoadLocation("Asia/Shanghai")
+	now := time.Now().In(loc)
+
+	cases := []struct {
+		name      string
+		timeOfDay string
+		lastDate  string
+	}{
+		{name: "before time", timeOfDay: now.Add(time.Hour).Format("15:04:05")},
+		{name: "already ran", timeOfDay: now.Add(-30 * time.Second).Format("15:04:05"), lastDate: now.Format("2006-01-02")},
+		{name: "missed window", timeOfDay: now.Add(-10 * time.Minute).Format("15:04:05")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newStore(t)
+			acc := addAccount(t, st, 1, "20240003")
+			if _, err := st.SaveSchedule(1, store.Schedule{
+				Enabled: true, TimeOfDay: tc.timeOfDay, AccountIDs: []int64{acc.ID},
+				MaxRetries: 0, RetryIntervalMinutes: 1,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if tc.lastDate != "" {
+				if err := st.MarkScheduledRun(1, tc.lastDate, now, "ok"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			runner := &fakeRunner{calls: make(chan runCall, 1)}
+			sched := New(st, runner, nil, loc, nil)
+			sched.check(context.Background())
+			select {
+			case <-runner.calls:
+				t.Fatal("scheduler should not run")
+			default:
+			}
+		})
+	}
+}
+
+func TestCheckSkipsWhileRunning(t *testing.T) {
+	loc, _ := time.LoadLocation("Asia/Shanghai")
+	st := newStore(t)
+	acc := addAccount(t, st, 1, "20240004")
+	now := time.Now().In(loc)
+	if _, err := st.SaveSchedule(1, store.Schedule{
+		Enabled: true, TimeOfDay: now.Add(-30 * time.Second).Format("15:04:05"),
+		AccountIDs: []int64{acc.ID}, MaxRetries: 0, RetryIntervalMinutes: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{calls: make(chan runCall, 1), running: true}
+	sched := New(st, runner, nil, loc, nil)
+	sched.check(context.Background())
+	select {
+	case <-runner.calls:
+		t.Fatal("scheduler ran while another run is active")
+	default:
+	}
+}
+
+func TestCheckHandlesMultipleOwnersSerially(t *testing.T) {
+	loc, _ := time.LoadLocation("Asia/Shanghai")
+	st := newStore(t)
+	now := time.Now().In(loc)
+	for _, owner := range []uint64{11, 22} {
+		acc := addAccount(t, st, owner, "2024001"+string(rune('0'+owner%10)))
+		if _, err := st.SaveSchedule(owner, store.Schedule{
+			Enabled: true, TimeOfDay: now.Add(-30 * time.Second).Format("15:04:05"),
+			AccountIDs: []int64{acc.ID}, MaxRetries: 0, RetryIntervalMinutes: 1,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runner := &fakeRunner{calls: make(chan runCall, 4)}
+	sched := New(st, runner, nil, loc, nil)
+
+	sched.check(context.Background())
+	if len(runner.calls) != 1 {
+		t.Fatalf("first check ran %d owners, want 1", len(runner.calls))
+	}
+	first := <-runner.calls
+	if first.ownerID != 11 {
+		t.Fatalf("first owner = %d, want 11", first.ownerID)
 	}
 
-	today := time.Now().In(loc).Format("2006-01-02")
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if st.Schedule().LastRunDate == today {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
+	sched.check(context.Background())
+	if len(runner.calls) != 1 {
+		t.Fatalf("second check ran %d owners, want 1", len(runner.calls))
 	}
-	t.Fatalf("last run date not marked, schedule = %+v", st.Schedule())
+	second := <-runner.calls
+	if second.ownerID != 22 {
+		t.Fatalf("second owner = %d, want 22", second.ownerID)
+	}
+
+	sched.check(context.Background())
+	select {
+	case call := <-runner.calls:
+		t.Fatalf("third check ran %+v, both owners should be done", call)
+	default:
+	}
 }
 
 func TestFailedResults(t *testing.T) {
@@ -172,27 +315,14 @@ func TestShouldNotify(t *testing.T) {
 	}
 }
 
-func TestSchedulerSendsFailureNotification(t *testing.T) {
-	loc, err := time.LoadLocation("Asia/Shanghai")
-	if err != nil {
-		t.Fatal(err)
-	}
-	st, err := store.New(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	acc, err := st.AddAccount(store.AccountInput{
-		StudentID: "20240002",
-		Password:  "pass",
-		Campus:    "宜宾",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	target := time.Now().In(loc).Add(3 * time.Second)
-	if _, err := st.SaveSchedule(store.Schedule{
+func TestCheckSendsFailureNotification(t *testing.T) {
+	loc, _ := time.LoadLocation("Asia/Shanghai")
+	st := newStore(t)
+	acc := addAccount(t, st, 5, "20240005")
+	now := time.Now().In(loc)
+	if _, err := st.SaveSchedule(5, store.Schedule{
 		Enabled:              true,
-		TimeOfDay:            target.Format("15:04:05"),
+		TimeOfDay:            now.Add(-30 * time.Second).Format("15:04:05"),
 		AccountIDs:           []int64{acc.ID},
 		MaxRetries:           2,
 		RetryIntervalMinutes: 1,
@@ -203,20 +333,19 @@ func TestSchedulerSendsFailureNotification(t *testing.T) {
 	}
 
 	runner := &fakeRunner{
-		calls: make(chan []int64, 1),
+		calls: make(chan runCall, 1),
 		result: store.Run{
 			Summary:    "成功 0，失败 1，共 1 个账号",
 			StartedAt:  time.Now(),
 			FinishedAt: time.Now(),
 			Results: []store.AccountResult{
-				{AccountID: acc.ID, StudentID: "20240002", Status: "login_failed", Message: "密码错误"},
+				{AccountID: acc.ID, StudentID: "20240005", Status: "login_failed", Message: "密码错误"},
 			},
 		},
 	}
 	notifier := &fakeNotifier{calls: make(chan notifyCall, 1)}
 	sched := New(st, runner, notifier, loc, nil)
-	sched.Start()
-	defer sched.Stop()
+	sched.check(context.Background())
 
 	select {
 	case call := <-notifier.calls:
@@ -226,27 +355,18 @@ func TestSchedulerSendsFailureNotification(t *testing.T) {
 		if len(call.run.Results) != 1 || call.run.Results[0].Status != "login_failed" {
 			t.Fatalf("notify run = %+v", call.run)
 		}
-	case <-time.After(8 * time.Second):
+	default:
 		t.Fatal("scheduler did not send failure notification")
 	}
-
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if strings.Contains(st.Schedule().LastResult, "失败通知已发送") {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
+	if got := st.Schedule(5); !strings.Contains(got.LastResult, "失败通知已发送") {
+		t.Fatalf("notification status missing: %+v", got)
 	}
-	t.Fatalf("notification status missing: %+v", st.Schedule())
 }
 
 func TestStopBeforeStartDoesNotBlock(t *testing.T) {
 	loc, _ := time.LoadLocation("Asia/Shanghai")
-	st, err := store.New(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	sched := New(st, &fakeRunner{calls: make(chan []int64, 1)}, nil, loc, nil)
+	st := newStore(t)
+	sched := New(st, &fakeRunner{calls: make(chan runCall, 1)}, nil, loc, nil)
 	done := make(chan struct{})
 	go func() {
 		sched.Stop()

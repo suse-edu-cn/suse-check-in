@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -25,31 +26,59 @@ import (
 )
 
 const (
-	testOAAAccount  = "20240000"
-	testOAAPassword = "oaa-secret"
-	testOAADevice   = "checkin-test"
+	testOwner       uint64 = 42
+	testOAAAccount         = "20240000"
+	testOAAPassword        = "oaa-secret"
+	testOAADevice          = "checkin-test"
+
+	testOtherOwner       uint64 = 43
+	testOtherOAAAccount         = "20240001"
+	testOtherOAAPassword        = "oaa-secret-2"
 )
 
 type testRecognizer struct{}
 
 func (testRecognizer) Recognize([]byte) (string, error) { return "1234", nil }
 
+type oaaFixture struct {
+	password  string
+	userID    uint64
+	studentID string
+	name      string
+	email     string
+}
+
 type fakeOAA struct {
 	url string
 
-	mu              sync.Mutex
-	seq             int
-	revokedAccess   map[string]bool
-	revokedRefresh  map[string]bool
-	refreshByAccess map[string]string
+	mu               sync.Mutex
+	seq              int
+	revokedAccess    map[string]bool
+	revokedRefresh   map[string]bool
+	refreshByAccess  map[string]string
+	accountByAccess  map[string]string
+	accountByRefresh map[string]string
+	fixtures         map[string]oaaFixture
 }
 
 func newFakeOAA(t *testing.T) *fakeOAA {
 	t.Helper()
 	f := &fakeOAA{
-		revokedAccess:   make(map[string]bool),
-		revokedRefresh:  make(map[string]bool),
-		refreshByAccess: make(map[string]string),
+		revokedAccess:    make(map[string]bool),
+		revokedRefresh:   make(map[string]bool),
+		refreshByAccess:  make(map[string]string),
+		accountByAccess:  make(map[string]string),
+		accountByRefresh: make(map[string]string),
+		fixtures: map[string]oaaFixture{
+			testOAAAccount: {
+				password: testOAAPassword, userID: testOwner,
+				studentID: testOAAAccount, name: "测试用户", email: "tester@example.com",
+			},
+			testOtherOAAAccount: {
+				password: testOtherOAAPassword, userID: testOtherOwner,
+				studentID: testOtherOAAAccount, name: "另一个用户", email: "other@example.com",
+			},
+		},
 	}
 	ts := httptest.NewServer(http.HandlerFunc(f.handle))
 	t.Cleanup(ts.Close)
@@ -67,11 +96,13 @@ func writeOAAResponse(w http.ResponseWriter, status int, message string, data an
 	})
 }
 
-func (f *fakeOAA) issueLocked() (string, string) {
+func (f *fakeOAA) issueLocked(account string) (string, string) {
 	f.seq++
 	access := fmt.Sprintf("access-%d", f.seq)
 	refresh := fmt.Sprintf("refresh-%d", f.seq)
 	f.refreshByAccess[access] = refresh
+	f.accountByAccess[access] = account
+	f.accountByRefresh[refresh] = account
 	return access, refresh
 }
 
@@ -87,7 +118,8 @@ func (f *fakeOAA) handle(w http.ResponseWriter, r *http.Request) {
 			writeOAAResponse(w, http.StatusBadRequest, "获取json失败", nil)
 			return
 		}
-		if req.Account != testOAAAccount || req.Password != testOAAPassword {
+		fixture, ok := f.fixtures[req.Account]
+		if !ok || req.Password != fixture.password {
 			writeOAAResponse(w, http.StatusBadRequest, "密码错误", nil)
 			return
 		}
@@ -96,7 +128,7 @@ func (f *fakeOAA) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.mu.Lock()
-		access, refresh := f.issueLocked()
+		access, refresh := f.issueLocked(req.Account)
 		f.mu.Unlock()
 		writeOAAResponse(w, http.StatusOK, "success", map[string]string{
 			"token":         access,
@@ -111,17 +143,19 @@ func (f *fakeOAA) handle(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		revoked := f.revokedAccess[access]
 		_, issued := f.refreshByAccess[access]
+		account := f.accountByAccess[access]
+		fixture, known := f.fixtures[account]
 		f.mu.Unlock()
-		if access == "" || revoked || !issued {
+		if access == "" || revoked || !issued || !known {
 			writeOAAResponse(w, http.StatusUnauthorized, "Token 无效", nil)
 			return
 		}
 		writeOAAResponse(w, http.StatusOK, "success", map[string]any{
-			"user_id":    42,
-			"student_id": testOAAAccount,
+			"user_id":    fixture.userID,
+			"student_id": fixture.studentID,
 			"username":   "tester",
-			"name":       "测试用户",
-			"email":      "tester@example.com",
+			"name":       fixture.name,
+			"email":      fixture.email,
 			"department": "技术部",
 			"role":       "会员",
 			"role_level": 10,
@@ -139,12 +173,14 @@ func (f *fakeOAA) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.mu.Lock()
-		valid := strings.HasPrefix(req.RefreshToken, "refresh-") && !f.revokedRefresh[req.RefreshToken]
+		account, bound := f.accountByRefresh[req.RefreshToken]
+		valid := bound && strings.HasPrefix(req.RefreshToken, "refresh-") && !f.revokedRefresh[req.RefreshToken]
 		access := ""
 		if valid {
 			f.seq++
 			access = fmt.Sprintf("access-%d", f.seq)
 			f.refreshByAccess[access] = req.RefreshToken
+			f.accountByAccess[access] = account
 		}
 		f.mu.Unlock()
 		if !valid {
@@ -241,8 +277,12 @@ func defaultFakeWechat() *fakeWechatService {
 
 func newTestServerWithNotify(t *testing.T, notificationsAvailable bool) (*Server, *store.Store, string) {
 	t.Helper()
+	return buildTestServer(t, t.TempDir(), notificationsAvailable)
+}
+
+func buildTestServer(t *testing.T, dir string, notificationsAvailable bool) (*Server, *store.Store, string) {
+	t.Helper()
 	fake := newFakeOAA(t)
-	dir := t.TempDir()
 	st, err := store.New(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -360,27 +400,35 @@ func authRequest(t *testing.T, client *http.Client, token, method, url string, b
 	return requestJSON(t, client, method, url, body, token)
 }
 
-func loginTest(t *testing.T, ts *httptest.Server) (string, string, oaa.User) {
+type loginResult struct {
+	Token        string   `json:"token"`
+	RefreshToken string   `json:"refresh_token"`
+	User         oaa.User `json:"user"`
+}
+
+func loginAs(t *testing.T, ts *httptest.Server, account, password string) loginResult {
 	t.Helper()
 	resp, raw := jsonRequest(t, ts.Client(), http.MethodPost, ts.URL+"/api/auth/login", map[string]string{
-		"account":  testOAAAccount,
-		"password": testOAAPassword,
+		"account":  account,
+		"password": password,
 		"device":   testOAADevice,
 	})
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("login status = %d, body = %s", resp.StatusCode, raw)
+		t.Fatalf("login %s status = %d, body = %s", account, resp.StatusCode, raw)
 	}
-	var out struct {
-		Token        string   `json:"token"`
-		RefreshToken string   `json:"refresh_token"`
-		User         oaa.User `json:"user"`
-	}
+	var out loginResult
 	if err := json.Unmarshal(raw, &out); err != nil {
 		t.Fatal(err)
 	}
 	if out.Token == "" || out.RefreshToken == "" {
 		t.Fatalf("login tokens missing: %s", raw)
 	}
+	return out
+}
+
+func loginTest(t *testing.T, ts *httptest.Server) (string, string, oaa.User) {
+	t.Helper()
+	out := loginAs(t, ts, testOAAAccount, testOAAPassword)
 	return out.Token, out.RefreshToken, out.User
 }
 
@@ -580,7 +628,7 @@ func TestAuthUpstreamFailure(t *testing.T) {
 func TestStateDoesNotLeakSecrets(t *testing.T) {
 	ts, token, _, st, _ := newAuthedTestHTTP(t)
 	view := createAccount(t, ts, token, "20240001")
-	if err := st.SaveRememberCookies(view.ID, "CASTGC=secret-cookie", time.Now().Add(time.Hour)); err != nil {
+	if err := st.SaveRememberCookies(testOwner, view.ID, "CASTGC=secret-cookie", time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	resp, raw := authRequest(t, ts.Client(), token, http.MethodGet, ts.URL+"/api/state", nil)
@@ -634,7 +682,7 @@ func TestAccountCRUDAndValidation(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("update status = %d, body = %s", resp.StatusCode, raw)
 	}
-	acc, ok := st.Account(view.ID)
+	acc, ok := st.Account(testOwner, view.ID)
 	if !ok {
 		t.Fatal("account missing")
 	}
@@ -680,7 +728,7 @@ func TestScheduleAPI(t *testing.T) {
 	if saved.TimeOfDay != "07:30:00" || len(saved.AccountIDs) != 1 || !saved.Enabled {
 		t.Fatalf("saved = %+v", saved)
 	}
-	if got := st.Schedule(); got.TimeOfDay != "07:30:00" || !got.Enabled {
+	if got := st.Schedule(testOwner); got.TimeOfDay != "07:30:00" || !got.Enabled {
 		t.Fatalf("store schedule = %+v", got)
 	}
 
@@ -724,7 +772,7 @@ func TestScheduleNotificationSettings(t *testing.T) {
 	if !saved.NotifyEnabled || saved.NotifyEmail != "notify@example.com" {
 		t.Fatalf("saved notification = %+v", saved)
 	}
-	if got := st.Schedule(); !got.NotifyEnabled || got.NotifyEmail != "notify@example.com" {
+	if got := st.Schedule(testOwner); !got.NotifyEnabled || got.NotifyEmail != "notify@example.com" {
 		t.Fatalf("store notification = %+v", got)
 	}
 
@@ -775,7 +823,7 @@ func TestScheduleNotificationSettings(t *testing.T) {
 func TestRunAPIAndAsyncFailure(t *testing.T) {
 	ts, token, _, st, _ := newAuthedTestHTTP(t)
 	view := createAccount(t, ts, token, "20240020")
-	if _, err := st.SaveSchedule(store.Schedule{
+	if _, err := st.SaveSchedule(testOwner, store.Schedule{
 		TimeOfDay:            "07:00:00",
 		AccountIDs:           []int64{view.ID},
 		MaxRetries:           0,
@@ -925,5 +973,132 @@ func TestCaptchaPreviewRouteRemoved(t *testing.T) {
 	resp, raw := authRequest(t, ts.Client(), token, http.MethodGet, ts.URL+"/api/captcha/preview", nil)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("preview status = %d, body = %s", resp.StatusCode, raw)
+	}
+}
+
+func TestCrossUserIsolation(t *testing.T) {
+	ts, token1, _, _, _ := newAuthedTestHTTP(t)
+	acc := createAccount(t, ts, token1, "20240101")
+
+	resp, raw := authRequest(t, ts.Client(), token1, http.MethodPut, ts.URL+"/api/schedule", map[string]any{
+		"enabled":              true,
+		"timeOfDay":            "07:30:00",
+		"accountIds":           []int64{acc.ID},
+		"maxRetries":           1,
+		"retryIntervalMinutes": 1,
+		"notifyEnabled":        false,
+		"notifyEmail":          "",
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("save schedule status = %d, body = %s", resp.StatusCode, raw)
+	}
+
+	token2 := loginAs(t, ts, testOtherOAAAccount, testOtherOAAPassword).Token
+	resp, raw = authRequest(t, ts.Client(), token2, http.MethodGet, ts.URL+"/api/state", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("state status = %d, body = %s", resp.StatusCode, raw)
+	}
+	var other stateResponse
+	if err := json.Unmarshal(raw, &other); err != nil {
+		t.Fatal(err)
+	}
+	if len(other.Accounts) != 0 || len(other.Runs) != 0 || other.Schedule.Enabled {
+		t.Fatalf("owner 2 sees owner 1 data: %d accounts, %d runs, schedule=%+v", len(other.Accounts), len(other.Runs), other.Schedule)
+	}
+	if other.Scheduler.Enabled || other.Scheduler.LastResult != "" {
+		t.Fatalf("owner 2 scheduler status = %+v", other.Scheduler)
+	}
+
+	accountURL := ts.URL + "/api/accounts/" + strconv.FormatInt(acc.ID, 10)
+	resp, _ = authRequest(t, ts.Client(), token2, http.MethodPut, accountURL, accountBody("20240101"))
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("cross-owner update status = %d", resp.StatusCode)
+	}
+	resp, _ = authRequest(t, ts.Client(), token2, http.MethodDelete, accountURL, nil)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("cross-owner delete status = %d", resp.StatusCode)
+	}
+	resp, _ = authRequest(t, ts.Client(), token2, http.MethodPost, ts.URL+"/api/run", map[string]any{
+		"accountIds": []int64{acc.ID},
+	})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("cross-owner run status = %d", resp.StatusCode)
+	}
+	resp, _ = authRequest(t, ts.Client(), token2, http.MethodPut, ts.URL+"/api/schedule", map[string]any{
+		"enabled":              true,
+		"timeOfDay":            "07:30:00",
+		"accountIds":           []int64{acc.ID},
+		"maxRetries":           1,
+		"retryIntervalMinutes": 1,
+		"notifyEnabled":        false,
+		"notifyEmail":          "",
+	})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("cross-owner schedule status = %d", resp.StatusCode)
+	}
+
+	resp, raw = authRequest(t, ts.Client(), token1, http.MethodGet, ts.URL+"/api/state", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("owner 1 state status = %d", resp.StatusCode)
+	}
+	var mine stateResponse
+	if err := json.Unmarshal(raw, &mine); err != nil {
+		t.Fatal(err)
+	}
+	if len(mine.Accounts) != 1 || !mine.Schedule.Enabled || len(mine.Schedule.AccountIDs) != 1 {
+		t.Fatalf("owner 1 data changed: %d accounts, schedule=%+v", len(mine.Accounts), mine.Schedule)
+	}
+}
+
+const legacyStateJSON = `{
+  "version": 1,
+  "accounts": [
+    {"id": 1, "studentId": "24100999", "name": "迁移账号", "loginType": "password", "passwordEnc": "", "campus": "宜宾", "lastStatus": "成功：签到成功", "createdAt": "2026-10-26T10:00:00Z", "updatedAt": "2026-10-26T10:00:00Z"}
+  ],
+  "schedule": {"enabled": true, "timeOfDay": "19:01:00", "accountIds": [1], "maxRetries": 2, "retryIntervalMinutes": 5, "notifyEnabled": false, "lastRunDate": "2026-10-26", "lastResult": "成功 1，失败 0，共 1 个账号"},
+  "runs": [
+    {"id": 1, "trigger": "scheduled", "startedAt": "2026-10-26T11:01:00Z", "finishedAt": "2026-10-26T11:01:30Z", "summary": "成功 1，失败 0，共 1 个账号", "results": [{"accountId": 1, "studentId": "24100999", "accountName": "迁移账号", "status": "success", "message": "签到成功", "startedAt": "2026-10-26T11:01:00Z", "finishedAt": "2026-10-26T11:01:30Z"}]}
+  ]
+}`
+
+func TestLegacyStateClaimedByFirstLogin(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte(legacyStateJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv, _, _ := buildTestServer(t, dir, true)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	token := loginAs(t, ts, testOAAAccount, testOAAPassword).Token
+	resp, raw := authRequest(t, ts.Client(), token, http.MethodGet, ts.URL+"/api/state", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("state status = %d, body = %s", resp.StatusCode, raw)
+	}
+	var state stateResponse
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Accounts) != 1 || state.Accounts[0].StudentID != "24100999" {
+		t.Fatalf("migrated accounts = %+v", state.Accounts)
+	}
+	if !state.Schedule.Enabled || state.Schedule.TimeOfDay != "19:01:00" || len(state.Schedule.AccountIDs) != 1 {
+		t.Fatalf("migrated schedule = %+v", state.Schedule)
+	}
+	if len(state.Runs) != 1 || len(state.Runs[0].Results) != 1 {
+		t.Fatalf("migrated runs = %+v", state.Runs)
+	}
+
+	other := loginAs(t, ts, testOtherOAAAccount, testOtherOAAPassword).Token
+	resp, raw = authRequest(t, ts.Client(), other, http.MethodGet, ts.URL+"/api/state", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("other state status = %d", resp.StatusCode)
+	}
+	var otherState stateResponse
+	if err := json.Unmarshal(raw, &otherState); err != nil {
+		t.Fatal(err)
+	}
+	if len(otherState.Accounts) != 0 {
+		t.Fatalf("second user inherited legacy data: %+v", otherState.Accounts)
 	}
 }

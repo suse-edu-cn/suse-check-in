@@ -2,7 +2,6 @@ package scheduler
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -13,8 +12,13 @@ import (
 	"suse-checkin/internal/store"
 )
 
+const (
+	tickInterval  = 30 * time.Second
+	catchupWindow = 2 * time.Minute
+)
+
 type Runner interface {
-	RunAccounts(ctx context.Context, accountIDs []int64, trigger string) (store.Run, error)
+	RunAccounts(ctx context.Context, ownerID uint64, accountIDs []int64, trigger string) (store.Run, error)
 	IsRunning() bool
 }
 
@@ -46,17 +50,17 @@ type Scheduler struct {
 	startOnce sync.Once
 	stopOnce  sync.Once
 
-	mu      sync.Mutex
-	started bool
-	cancel  context.CancelFunc
-	status  Status
+	mu           sync.Mutex
+	started      bool
+	cancel       context.CancelFunc
+	runningOwner uint64
 }
 
 func New(st *store.Store, runner Runner, notifier Notifier, loc *time.Location, logger *log.Logger) *Scheduler {
 	if logger == nil {
 		logger = log.New(io.Discard, "", 0)
 	}
-	s := &Scheduler{
+	return &Scheduler{
 		store:    st,
 		runner:   runner,
 		notifier: notifier,
@@ -67,14 +71,6 @@ func New(st *store.Store, runner Runner, notifier Notifier, loc *time.Location, 
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
 	}
-	sch := st.Schedule()
-	s.status = Status{
-		Enabled:    sch.Enabled,
-		LastRunAt:  copyTimePtr(sch.LastRunAt),
-		LastResult: sch.LastResult,
-		Message:    "调度器未启动",
-	}
-	return s
 }
 
 func (s *Scheduler) Start() {
@@ -107,6 +103,7 @@ func (s *Scheduler) Stop() {
 	})
 }
 
+// Wake 让调度器立即检查一次（保存定时设置、删除账号后调用）。
 func (s *Scheduler) Wake() {
 	select {
 	case s.wake <- struct{}{}:
@@ -114,115 +111,115 @@ func (s *Scheduler) Wake() {
 	}
 }
 
-func (s *Scheduler) Status() Status {
+// Status 返回某个 OAA 用户视角的调度状态。
+func (s *Scheduler) Status(ownerID uint64) Status {
+	sch := s.store.Schedule(ownerID)
+	now := s.now().In(s.loc)
+	st := Status{
+		Enabled:    sch.Enabled,
+		LastRunAt:  copyTimePtr(sch.LastRunAt),
+		LastResult: sch.LastResult,
+	}
+	switch {
+	case !sch.Enabled:
+		st.Message = "定时打卡未启用"
+	case len(sch.AccountIDs) == 0:
+		st.Message = "定时打卡已启用，但未选择账号"
+	default:
+		if next, err := nextRunAt(now, sch.TimeOfDay, s.loc); err == nil {
+			st.NextRun = &next
+			st.NextRunText = next.Format("2006-01-02 15:04:05")
+		}
+		if sch.LastRunDate == now.Format("2006-01-02") {
+			st.Message = "今日定时打卡已执行"
+		} else {
+			st.Message = "等待执行"
+		}
+	}
+	if s.currentOwner() == ownerID && s.runner.IsRunning() {
+		st.Message = "正在执行定时打卡"
+	}
+	return st
+}
+
+func (s *Scheduler) currentOwner() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := s.status
-	out.NextRun = copyTimePtr(s.status.NextRun)
-	out.LastRunAt = copyTimePtr(s.status.LastRunAt)
-	return out
+	return s.runningOwner
 }
 
 func (s *Scheduler) loop(ctx context.Context) {
+	ticker := time.NewTicker(tickInterval)
+	defer ticker.Stop()
 	for {
-		schedule := s.store.Schedule()
-		s.syncFromSchedule(schedule)
-		if !schedule.Enabled {
-			s.setMessage("定时打卡未启用")
-			s.clearNextRun()
-			if !s.waitForWake(ctx) {
-				return
-			}
-			continue
-		}
-		if len(schedule.AccountIDs) == 0 {
-			s.setMessage("定时打卡已启用，但未选择账号")
-			s.clearNextRun()
-			if !s.waitForWake(ctx) {
-				return
-			}
-			continue
-		}
-		hour, minute, second, err := parseTimeOfDay(schedule.TimeOfDay)
-		if err != nil {
-			s.setMessage("定时时间无效: " + err.Error())
-			s.clearNextRun()
-			if !s.waitForWake(ctx) {
-				return
-			}
-			continue
-		}
-
-		next := nextRun(s.now().In(s.loc), hour, minute, second, s.loc)
-		s.setNextRun(next)
-		s.setMessage("等待执行")
-		timer := time.NewTimer(time.Until(next))
 		select {
 		case <-ctx.Done():
-			timer.Stop()
 			return
 		case <-s.stop:
-			timer.Stop()
 			return
 		case <-s.wake:
-			timer.Stop()
-			continue
-		case <-timer.C:
+			s.check(ctx)
+		case <-ticker.C:
+			s.check(ctx)
 		}
-
-		schedule = s.store.Schedule()
-		if !schedule.Enabled || len(schedule.AccountIDs) == 0 {
-			continue
-		}
-		today := s.now().In(s.loc).Format("2006-01-02")
-		if schedule.LastRunDate == today {
-			s.setMessage("今日定时打卡已执行")
-			s.clearNextRun()
-			continue
-		}
-
-		ready := s.waitForRunner(ctx, 10*time.Minute)
-		if !ready {
-			select {
-			case <-ctx.Done():
-				return
-			case <-s.stop:
-				return
-			default:
-			}
-			s.setMessage("另一个打卡任务仍在运行，跳过本次定时打卡")
-			continue
-		}
-
-		s.setMessage("正在执行定时打卡")
-		run, err := s.runner.RunAccounts(ctx, schedule.AccountIDs, "scheduled")
-		finished := s.now().In(s.loc)
-		if err != nil {
-			s.logger.Printf("[scheduler] 定时打卡失败: %v", err)
-			if errors.Is(err, context.Canceled) {
-				return
-			}
-			s.setMessage("执行失败: " + err.Error())
-			continue
-		}
-		summary := run.Summary
-		if summary == "" {
-			summary = "定时打卡完成"
-		}
-		if shouldNotify(schedule, run) {
-			summary = s.sendFailureNotice(schedule, run, summary)
-		}
-		if err := s.store.MarkScheduledRun(today, finished, summary); err != nil {
-			s.logger.Printf("[scheduler] 保存定时结果失败: %v", err)
-		}
-		s.mu.Lock()
-		s.status.LastRunAt = &finished
-		s.status.LastResult = summary
-		s.status.Message = "定时打卡完成"
-		s.status.NextRun = nil
-		s.status.NextRunText = ""
-		s.mu.Unlock()
 	}
+}
+
+// check 遍历所有启用定时的用户，到点且今日未执行时串行执行一次。
+func (s *Scheduler) check(ctx context.Context) {
+	if s.runner.IsRunning() {
+		return
+	}
+	plans, err := s.store.ScheduledPlans()
+	if err != nil {
+		s.logger.Printf("[scheduler] 读取定时计划失败: %v", err)
+		return
+	}
+	now := s.now().In(s.loc)
+	today := now.Format("2006-01-02")
+	for _, plan := range plans {
+		if len(plan.AccountIDs) == 0 || plan.Schedule.LastRunDate == today {
+			continue
+		}
+		target, err := timeOfDayAt(now, plan.Schedule.TimeOfDay, s.loc)
+		if err != nil {
+			s.logger.Printf("[scheduler] 用户 %d 定时时间无效: %v", plan.OwnerID, err)
+			continue
+		}
+		if now.Before(target) || now.Sub(target) > catchupWindow {
+			continue
+		}
+		s.runPlan(ctx, plan, today)
+		return
+	}
+}
+
+func (s *Scheduler) runPlan(ctx context.Context, plan store.ScheduledPlan, today string) {
+	s.setRunningOwner(plan.OwnerID)
+	defer s.setRunningOwner(0)
+
+	run, err := s.runner.RunAccounts(ctx, plan.OwnerID, plan.AccountIDs, "scheduled")
+	finished := s.now().In(s.loc)
+	if err != nil {
+		s.logger.Printf("[scheduler] 用户 %d 定时打卡失败: %v", plan.OwnerID, err)
+		return
+	}
+	summary := run.Summary
+	if summary == "" {
+		summary = "定时打卡完成"
+	}
+	if shouldNotify(plan.Schedule, run) {
+		summary = s.sendFailureNotice(plan.Schedule, run, summary)
+	}
+	if err := s.store.MarkScheduledRun(plan.OwnerID, today, finished, summary); err != nil {
+		s.logger.Printf("[scheduler] 用户 %d 保存定时结果失败: %v", plan.OwnerID, err)
+	}
+}
+
+func (s *Scheduler) setRunningOwner(ownerID uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.runningOwner = ownerID
 }
 
 func (s *Scheduler) sendFailureNotice(schedule store.Schedule, run store.Run, summary string) string {
@@ -256,65 +253,6 @@ func failedResults(results []store.AccountResult) []store.AccountResult {
 	return out
 }
 
-func (s *Scheduler) waitForWake(ctx context.Context) bool {
-	select {
-	case <-ctx.Done():
-		return false
-	case <-s.stop:
-		return false
-	case <-s.wake:
-		return true
-	}
-}
-
-func (s *Scheduler) waitForRunner(ctx context.Context, maxWait time.Duration) bool {
-	deadline := time.Now().Add(maxWait)
-	for s.runner.IsRunning() {
-		if time.Now().After(deadline) {
-			return false
-		}
-		timer := time.NewTimer(30 * time.Second)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return false
-		case <-s.stop:
-			timer.Stop()
-			return false
-		case <-timer.C:
-		}
-	}
-	return true
-}
-
-func (s *Scheduler) syncFromSchedule(schedule store.Schedule) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.status.Enabled = schedule.Enabled
-	s.status.LastRunAt = copyTimePtr(schedule.LastRunAt)
-	s.status.LastResult = schedule.LastResult
-}
-
-func (s *Scheduler) setNextRun(next time.Time) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.status.NextRun = &next
-	s.status.NextRunText = next.Format("2006-01-02 15:04:05")
-}
-
-func (s *Scheduler) clearNextRun() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.status.NextRun = nil
-	s.status.NextRunText = ""
-}
-
-func (s *Scheduler) setMessage(message string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.status.Message = message
-}
-
 func parseTimeOfDay(value string) (int, int, int, error) {
 	for _, layout := range []string{"15:04:05", "15:04"} {
 		t, err := time.Parse(layout, value)
@@ -325,13 +263,26 @@ func parseTimeOfDay(value string) (int, int, int, error) {
 	return 0, 0, 0, fmt.Errorf("时间格式应为 HH:MM 或 HH:MM:SS")
 }
 
-func nextRun(now time.Time, hour, minute, second int, loc *time.Location) time.Time {
+// timeOfDayAt 返回 now 当天的定时时刻。
+func timeOfDayAt(now time.Time, timeOfDay string, loc *time.Location) (time.Time, error) {
+	hour, minute, second, err := parseTimeOfDay(timeOfDay)
+	if err != nil {
+		return time.Time{}, err
+	}
 	current := now.In(loc)
-	target := time.Date(current.Year(), current.Month(), current.Day(), hour, minute, second, 0, loc)
-	if !target.After(current) {
+	return time.Date(current.Year(), current.Month(), current.Day(), hour, minute, second, 0, loc), nil
+}
+
+// nextRunAt 返回严格晚于 now 的下一次定时时刻。
+func nextRunAt(now time.Time, timeOfDay string, loc *time.Location) (time.Time, error) {
+	target, err := timeOfDayAt(now, timeOfDay, loc)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if !target.After(now.In(loc)) {
 		target = target.AddDate(0, 0, 1)
 	}
-	return target
+	return target, nil
 }
 
 func copyTimePtr(t *time.Time) *time.Time {

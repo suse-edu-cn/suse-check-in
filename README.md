@@ -35,7 +35,7 @@
 - 退出登录会调用 OAA `/v2/auth/logout` 注销当前设备的 refresh token，并清空浏览器本地 token。
 - 设备标识由浏览器生成并保存在 localStorage（形如 `checkin-5fb7c12968`），同一浏览器的多个标签页共享。
 - 默认 `CHECKIN_OAA_BASE=http://127.0.0.1:8080`，部署时改成实际的 OAA 后端地址。
-- 当前**不做 OAA 用户之间的数据隔离**：任何能登录 OAA 的账号都可以访问本实例的打卡账号、定时设置和运行记录。不要把本实例直接暴露给不信任的用户。
+- **按 OAA 账号隔离数据**：打卡账号、定时设置、运行记录都带 `owner_id`，一个账号只能看到、运行和删除自己创建的数据；跨账号访问统一返回 404。
 
 ### 打卡账号的登录方式
 
@@ -85,6 +85,7 @@
 - 能访问 suseoaa 后端（默认 `http://127.0.0.1:8080`，需与后端版本匹配）。
 - 能访问 `uias.suse.edu.cn` 和 `qfhy.suse.edu.cn`（校外通常需要学校 VPN）。
 - 如需失败邮件通知，需要可用的 SMTP 服务；默认按 QQ 邮箱（`smtp.qq.com:465`）配置。
+- 数据存储使用纯 Go 的 SQLite 驱动 [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite)，不需要 cgo，交叉编译和 `CGO_ENABLED=0` 构建不受影响。
 - GoCaptcha 平台限制见其 README：
   - macOS ARM64 已验证；macOS Intel 通过 Rosetta 验证；
   - Linux x64 已验证，要求 glibc 2.27+，Alpine/musl 不支持；
@@ -247,15 +248,15 @@ text, err := recognizer.Recognize(img) // 并发安全，失败自动换图重�
 
 ## 安全与隐私
 
-- 默认监听 `127.0.0.1:8099`，页面需要 OAA 登录，但**没有按 OAA 用户隔离数据**：任何有效 OAA 账号都能查看和操作本实例的全部打卡账号。不要把实例暴露给不信任的用户，也不要直接暴露到公网。
+- 默认监听 `127.0.0.1:8099`。所有业务接口都按 OAA `user_id` 过滤，一个账号只能看到自己的打卡账号、定时设置和运行记录；跨账号读写一律返回 404。多人共用实例时仍需自行评估是否对外暴露。
 - 需要远程访问时，建议 SSH 隧道：
   ```bash
   ssh -L 8099:127.0.0.1:8099 user@your-host
   ```
   或在前面加带 TLS 和独立访问控制的反向代理。
 - OAA 的 access token 与 refresh token 保存在浏览器 localStorage，退出登录会清空并调用 OAA 登出。CSP 只允许同源脚本，但 localStorage 仍可能被 XSS 读取，请只在可信浏览器环境中使用。
-- SMTP 密码只从环境变量读取，不写入 `data/state.json`；通知邮件不包含打卡密码、Cookie 或验证码图片。
-- 打卡密码、UIAS rememberMe Cookie 和扫码账号的 `_sop_session_` / `SESSION` Cookie 都使用 AES-256-GCM 加密写入 `data/state.json`；密钥在 `data/key`（`0600`），状态文件也是 `0600`，数据目录 `0700`。
+- SMTP 密码只从环境变量读取，不写入 `data/state.db`；通知邮件不包含打卡密码、Cookie 或验证码图片。
+- 打卡密码、UIAS rememberMe Cookie 和扫码账号的 `_sop_session_` / `SESSION` Cookie 都使用 AES-256-GCM 加密后写入 SQLite 的 `password_enc` / `cookies_enc` 字段；密钥在 `data/key`（`0600`），`data/state.db` 也是 `0600`，数据目录 `0700`。
 - 扫码过程中的二维码和待登录状态只保存在服务端内存（默认最多保留 5 分钟），不会把 qfhy Cookie 暴露给浏览器；浏览器只拿到二维码图片和学号/姓名。
 - 前端按 `core / services / ui / views` 模块拆分，放在 `web/static/`，由 Go `embed` 打包进单文件二进制；页面只加载本机 `/static` 资源。
 - 密钥和密文在同一个目录，只能防止误传明文，不能抵御已控制本机账户的攻击者。不要把 `data/` 提交到 Git。
@@ -291,14 +292,27 @@ text, err := recognizer.Recognize(img) // 并发安全，失败自动换图重�
 
 ```text
 data/
-├── state.json                 # 加密密码/Cookie、调度配置、运行记录
+├── state.db                   # SQLite（WAL）：账号、定时、运行记录（0600）
+├── state.db-wal / state.db-shm
 ├── key                        # 32 字节 AES 密钥（0600）
 ├── gocaptcha/                 # GoCaptcha 释放的 ONNX Runtime
-└── captchas/
-    └── 2026-10-26/
-        ├── 1-20261026-070000.000-1.jpg
-        └── 1-20261026-070000.000-1.json
+├── captchas/
+│   └── 2026-10-26/
+│       ├── 1-20261026-070000.000-1.jpg
+│       └── 1-20261026-070000.000-1.json
+└── state.json                 # 仅旧版本遗留，迁移完成后保留作备份
 ```
+
+SQLite 表结构：
+
+| 表 | 内容 |
+|---|---|
+| `accounts` | 打卡账号；`owner_id` 为 OAA `user_id`，`UNIQUE(owner_id, student_id)`，`scheduled` 标记是否参与定时 |
+| `schedules` | 每个用户一行：启用状态、时间、重试、通知邮箱、上次执行日期/结果 |
+| `runs` / `run_results` | 运行记录与每个账号的结果（OCR、位置、验证码样本路径）；每个用户保留最近 200 条 |
+| `meta` | 迁移标记（`legacy_claimed` 等） |
+
+**旧数据迁移**：升级后第一次带身份访问接口（通常是登录后的 `/api/state`）时，如果 `data/state.json` 还存在且尚未迁移，服务会把里面的账号、定时设置和运行记录整体归给该 OAA 账号，并写入 `meta.legacy_claimed`；之后不再重复导入，原 `state.json` 保留不动，确认无误后可自行删除。
 
 删除 `data/key` 会导致已有密码和会话无法解密，需要重新录入账号。OAA 的 access/refresh token 不写入 `data/`，SMTP 凭据只从环境变量读取。
 
@@ -316,13 +330,13 @@ data/
 | `GET` | `/api/wechat/login/{id}` | Bearer | 查询扫码状态：`waiting/scanned/success/expired/error` |
 | `POST` | `/api/wechat/login/{id}/complete` | Bearer | 用扫码结果新增账号，或带 `accountId` 更新已有扫码账号 |
 | `DELETE` | `/api/wechat/login/{id}` | Bearer | 取消扫码登录并释放服务端会话 |
-| `GET` | `/api/state` | Bearer | 账号（脱敏）、校区点位数、调度、进度、最近 50 条运行记录、通知可用性 |
+| `GET` | `/api/state` | Bearer | **当前 OAA 用户**的账号（脱敏）、校区点位数、自身调度状态、进度、最近 50 条运行记录、通知可用性 |
 | `GET` | `/api/healthz` | 公开 | 健康检查 |
 | `POST` | `/api/accounts` | Bearer | 新增**密码**打卡账号（`loginType=password`） |
-| `PUT` | `/api/accounts/{id}` | Bearer | 修改打卡账号；`password` 留空表示不修改；扫码账号需带 `loginType=wechat` |
-| `DELETE` | `/api/accounts/{id}` | Bearer | 删除账号，同时从定时目标中移除 |
-| `PUT` | `/api/schedule` | Bearer | 保存定时配置；包含 `notifyEnabled`、`notifyEmail` |
-| `POST` | `/api/run` | Bearer | 异步运行指定账号，返回 `202`；用 `/api/state` 轮询进度 |
+| `PUT` | `/api/accounts/{id}` | Bearer | 修改自己的打卡账号；`password` 留空表示不修改；扫码账号需带 `loginType=wechat` |
+| `DELETE` | `/api/accounts/{id}` | Bearer | 删除自己的账号，同时从自己的定时目标中移除 |
+| `PUT` | `/api/schedule` | Bearer | 保存自己的定时配置；包含 `notifyEnabled`、`notifyEmail` |
+| `POST` | `/api/run` | Bearer | 异步运行自己的指定账号，返回 `202`；用 `/api/state` 轮询进度 |
 | `GET` | `/api/samples/{date}/{file}` | Bearer | 查看留样图片（仅 `data/captchas/` 下的安全文件名） |
 
 示例：
@@ -387,7 +401,7 @@ web/
 
 已实测：
 
-- `go test ./...`：通过。覆盖 9 个测试包、83 个顶层测试（store、RSA、上游客户端、微信扫码、打卡编排、调度、HTTP API、位置目录、OAA 认证客户端、邮件通知）。
+- `go test ./...`：通过。覆盖 9 个测试包、95 个顶层测试（SQLite store、跨用户隔离与旧数据迁移、RSA、上游客户端、微信扫码、打卡编排、调度、HTTP API、位置目录、OAA 认证客户端、邮件通知）。
 - `go vet ./...`：通过。
 - `go test -race ./...`：通过。
 - 位置目录：从源码提取 141 个点（宜宾 74、李白河 47、汇东 20）；逐点校验地址、经纬度与原始 `location` JSON 一致；服务层断言实际提交的点来自所选校区。
@@ -398,6 +412,8 @@ web/
 - 邮件通知单元测试：失败账号筛选、HTML 转义、SMTP 配置校验、连接失败处理、调度器在重试耗尽后调用通知并回写“失败通知已发送”。
 - 浏览器 UI：OAA 登录、扫码添加账号（mock qfhy 自动完成）、扫码账号重新扫码、扫码账号实际执行签到、账号操作菜单、用户下拉菜单、通知设置保存、响应式布局和表单下拉样式。
 - 浏览器 UI（界面重构）：页面只有三张卡片——“运行状态与定时”（hero 显示下次执行时间、日期 · 每天 HH:MM · 距今 x、调度消息、上次结果、进度与“运行定时账号”，下面是打卡账号/最近结果/失败重试/失败通知统计和定时账号列表）、打卡账号、最近运行。定时设置弹窗打开时回填服务端配置，编辑后出现“未保存”，取消与右上角关闭都会清除脏状态，保存后卡片与统计行同步；`/api/captcha/preview` 返回 404，页面已无验证码诊断卡片。
+- 多用户隔离（本轮）：`internal/store` 单测覆盖同校学号可被不同 OAA 用户各自添加、跨用户读写/删除/定时/运行记录一律 `ErrNotFound`；`internal/server` 覆盖两个 OAA 账号的 HTTP 隔离（用户 2 的 `/api/state` 为空、改删用户 1 的账号返回 404、不能用别人的账号建定时）。
+- 旧数据迁移（本轮）：先用真实 `data/state.json` 的副本启动新版本，首次登录后账号（2 个）、定时（19:01）和 7 条运行记录整体归到该 OAA 用户；第二个 OAA 账号看到空数据；迁移后 `state.json` 字节未变（sha256 一致），`meta.legacy_claimed=1`。
 
 未实测 / 边界：
 
@@ -407,7 +423,7 @@ web/
 - 无法验证学校端是否接受随机选出的具体点位；如果签到任务限定某个区域，随机点可能落在范围外，需要以真实结果为准。
 - 短信二次验证不会自动处理；遇到时本次运行会失败并记录原因。
 - 微信扫码登录依赖 qfhy 的二维码/SSE/SSO 链路；扫码会话 `_sop_session_` 过期后必须重新扫码，无法完全免人工。
-- 当前没有 OAA 用户级数据隔离；如果部署为多人共用实例，需要额外设计归属和权限。
+- 运行任务仍是**全局串行**：同一时刻只跑一个打卡任务，多个用户的定时同时到点时会依次执行（30 秒 tick，超过 2 分钟未启动的当日任务按“错过不补跑”跳过）。
 - 登录 token 存在浏览器 localStorage；高安全场景建议只在受信终端使用，或在反向代理层再加一层访问控制。
 - 学校接口、OAA 接口或页面结构变更后可能需要调整解析逻辑。
 - Windows/Linux ARM64 的上游 GoCaptcha 运行时限制同样适用于本项目。
@@ -482,7 +498,7 @@ access token 过期时页面会自动调用 refresh token。若 refresh token �
 
 **删除账号后密码/会话还能恢复吗**
 
-不能。删除操作会从 `state.json` 中移除该账号记录；如需保留请先备份 `data/`。
+不能。删除操作会从 `state.db` 中移除该账号记录；如需保留请先备份 `data/`。
 
 **端口被占用**
 

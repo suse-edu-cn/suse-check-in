@@ -75,6 +75,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	defer st.Close()
+	if err := st.LoadLegacyError(); err != nil {
+		logger.Printf("[store] 旧版数据不可用，已跳过迁移: %v", err)
+	}
+	if st.LegacyPending() {
+		logger.Printf("[store] 检测到旧版 state.json：第一个登录的 OAA 账号将接手这些账号、定时和运行记录")
+	}
 	loc, err := time.LoadLocation(cfg.Timezone)
 	if err != nil {
 		return fmt.Errorf("加载时区: %w", err)
