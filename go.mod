@@ -1,6 +1,6 @@
 module suse-checkin
 
-go 1.25.0
+go 1.27.3
 
 require github.com/YN1753/GoCaptcha v0.1.0-alpha.8
 

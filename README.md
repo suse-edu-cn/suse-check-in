@@ -81,7 +81,7 @@
 
 ## 环境要求
 
-- Go 1.25+（本项目在 Go 1.27.1 / macOS ARM64 上验收）。
+- Go 1.27.3+（`go.mod` 要求 1.27.3，低于此版本会由 Go 自动下载对应工具链；本项目在 Go 1.27.3 / macOS ARM64 上验收）。
 - 能访问 suseoaa 后端（默认 `http://127.0.0.1:8080`，需与后端版本匹配）。
 - 能访问 `uias.suse.edu.cn` 和 `qfhy.suse.edu.cn`（校外通常需要学校 VPN）。
 - 如需失败邮件通知，需要可用的 SMTP 服务；默认按 QQ 邮箱（`smtp.qq.com:465`）配置。
@@ -383,7 +383,7 @@ web/
 
 ## 测试与验收状态
 
-验收日期：2026-10-26；环境：macOS ARM64、Go 1.27.1、GoCaptcha v0.1.0-alpha.8。
+验收日期：2026-10-27；环境：macOS ARM64、Go 1.27.3、GoCaptcha v0.1.0-alpha.8。
 
 已实测：
 
